@@ -138,9 +138,14 @@ function runAsync(f: string): Promise<Result> {
 let passed = 0, failed = 0, cannotRun = 0;
 const failures: string[] = [];
 
+/* CANNOT RUN only from the harness's own header line (abortNoImplementation:
+ * `FAIL <file> -- CANNOT RUN`), never from the words anywhere in the output,
+ * and never for a file that timed out (AC-69). */
+const CANNOT_RUN_HEADER = /^FAIL \S+ -- CANNOT RUN$/;
+
 function report(f: string, r: Result): void {
   const out = r.out;
-  if (/CANNOT RUN/.test(out)) {
+  if (!r.timedOut && CANNOT_RUN_HEADER.test(out.split('\n')[0])) {
     cannotRun++;
     console.log('CANNOT RUN ' + f);
   } else if (r.status === 0) {
@@ -224,4 +229,6 @@ if (leftover.length) {
 }
 if (!keep) fs.rmSync(runRoot, { recursive: true, force: true });
 
-process.exit(failed > 0 || (leftover.length > 0 && !keep) ? 1 : 0);
+/* Every tool exists, so a CANNOT RUN can only mean a bin that went missing
+ * (a wrong bin dir, a broken install): it fails the run too (AC-69, D19). */
+process.exit(failed > 0 || cannotRun > 0 || (leftover.length > 0 && !keep) ? 1 : 0);

@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 /* git-history-rewrite (docs/SPECIFICATION.md § 3): replace / add-file. */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, main } from './cli.ts';
-import { createSigner } from './signer.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
+import { refuseNonUtf8 } from './encoding.ts';
+import { createSigner, buildSignedTagObject } from './signer.ts';
 import { createBackupBundle } from './bundle.ts';
 import * as leakscan from './leakscan.ts';
 import * as verify from './verify.ts';
+import { tagMessageFromRaw, signatureBlockCount, signatureStatus } from './siginfo.ts';
 
 type Env = NodeJS.ProcessEnv;
 
@@ -34,12 +35,8 @@ interface Rule {
   to: string;
 }
 
-interface TmpMsg {
-  path: string;
-  cleanup(): void;
-}
-
 interface RefTag {
+  ref: string;
   name: string;
   type: string;
   commit: string;
@@ -47,6 +44,7 @@ interface RefTag {
 }
 
 interface RefHead {
+  ref: string;
   name: string;
   sha: string;
 }
@@ -65,10 +63,9 @@ interface RewriteOpts {
   transformTree: (oldTree: string, write: boolean) => string;
   changeLabel: string;
   ruleSourcesCheck: string[] | null;
-}
-
-function requireRepo(repo: string): void {
-  if (!git.isRepo(repo)) throw new Refusal('not a git repository (' + repo + ')');
+  /** A refusal `transformTree` would raise, checked over every commit's
+   * tree before the backup bundle (§ 0, D20, AC-77). Writes nothing. */
+  precheck?: (oldTree: string) => void;
 }
 
 function shortSha(repo: string, env: Env, rev: string): string {
@@ -82,7 +79,7 @@ function refuseOnMerge(repo: string, env: Env): void {
 }
 
 function currentBranch(repo: string, env: Env): string {
-  const r = git.run(repo, ['symbolic-ref', '--short', 'HEAD'], { env });
+  const r = git.run(repo, ['symbolic-ref', 'HEAD'], { env });
   if (r.status !== 0) throw new Refusal('HEAD is detached');
   return (r.stdout as string).replace(/\n$/, '');
 }
@@ -102,18 +99,6 @@ function rawIdentity(repo: string, env: Env, sha: string): Identity {
     authorName: a.name, authorEmail: a.email, authorWhen: '@' + am[2],
     committerName: c.name, committerEmail: c.email, committerWhen: '@' + cm[2],
   };
-}
-
-function writeTmpMsg(msg: string): TmpMsg {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-tagmsg-'));
-  try {
-    const p = path.join(dir, 'msg.txt');
-    fs.writeFileSync(p, msg);
-    return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } } };
-  } catch (e) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* best effort */ }
-    throw e;
-  }
 }
 
 /* -------------------------------------------------------- tree rewriting --- */
@@ -206,6 +191,18 @@ function rewriteTreeWithRules(repo: string, env: Env, treeSha: string, rules: Ru
   return newTreeSha;
 }
 
+/** `setPathInTree`'s refusal on its own, read-only: a directory sits at
+ * exactly `segments` inside `treeSha`. */
+function refuseDirectoryAt(repo: string, env: Env, treeSha: string, segments: string[], repoPath: string): void {
+  let tree = treeSha;
+  for (let i = 0; i < segments.length; i++) {
+    const e = lsTreeOneLevel(repo, env, tree).find((x) => x.name === segments[i]);
+    if (!e || e.type !== 'tree') return;
+    if (i === segments.length - 1) throw new Refusal('a directory already exists at ' + repoPath);
+    tree = e.sha;
+  }
+}
+
 /** Sets (or replaces) a blob at `asPath` inside `treeSha`. Refuses if a
  * directory already sits at that exact path. Returns the new tree sha. */
 function setPathInTree(repo: string, env: Env, treeSha: string, segments: string[], mode: string,
@@ -263,19 +260,40 @@ function allRefCommitsTopoReverse(repo: string, env: Env): string[] {
 }
 
 function refTips(repo: string, env: Env): { heads: RefHead[]; tags: RefTag[] } {
-  const headsRaw = git.text(repo, ['for-each-ref', '--format=%(refname:short)\t%(objectname)', 'refs/heads'], { env });
+  const headsRaw = git.text(repo, ['for-each-ref', '--format=%(refname)\t%(objectname)', 'refs/heads'], { env });
   const heads = (headsRaw ? headsRaw.split('\n') : []).map((l): RefHead => {
-    const [name, sha] = l.split('\t');
-    return { name, sha };
+    const [ref, sha] = l.split('\t');
+    return { ref, name: git.refBase(ref, 'refs/heads/'), sha };
   });
   const tagsRaw = git.text(repo,
-    ['for-each-ref', '--format=%(refname:short)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
+    ['for-each-ref', '--format=%(refname)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
     { env });
   const tags = (tagsRaw ? tagsRaw.split('\n') : []).map((l): RefTag => {
-    const [name, type, deref, obj] = l.split('\t');
-    return { name, type, commit: type === 'tag' ? deref : obj, tagObj: obj };
+    const [ref, type, deref, obj] = l.split('\t');
+    return { ref, name: git.refBase(ref, 'refs/tags/'), type, commit: type === 'tag' ? deref : obj, tagObj: obj };
   });
   return { heads, tags };
+}
+
+/** Every annotated tag's own message (D20, AC-71): the raw object minus
+ * its trailing signature, by the same boundary walk git-sign uses (its
+ * D14/D16) -- never `%(contents)`, which for a signed tag includes the old
+ * signature, so a re-created tag carried two blocks. A tag whose message
+ * ends in a signature-shaped block gpg can neither verify nor attribute to
+ * any key is refused, as git-sign refuses it (D18): it may be an unsigned
+ * tag quoting a block, and stripping that would drop the user's text. */
+function tagMessages(repo: string, env: Env, tags: RefTag[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const t of tags) {
+    if (t.type !== 'tag') continue;
+    const raw = git.buffer(repo, ['cat-file', 'tag', t.tagObj], { env }).toString('utf8');
+    if (signatureBlockCount(raw, 'tag') === 1 && signatureStatus(repo, env, 'tag', t.tagObj, true, '').state === 'bad') {
+      throw new Refusal('tag ' + t.name + ' ends with a signature-shaped block gpg cannot verify or attribute to any key ' +
+        '-- indistinguishable from an unsigned tag whose message merely ends with a quoted block; refusing to guess, resolve manually');
+    }
+    out.set(t.name, tagMessageFromRaw(raw));
+  }
+  return out;
 }
 
 /**
@@ -283,14 +301,41 @@ function refTips(repo: string, env: Env): { heads: RefHead[]; tags: RefTag[] } {
  * applying `transformTree(oldTreeSha) -> newTreeSha` to each reachable
  * commit's tree, keeping parents/identities/messages byte-for-byte.
  */
+/** How `now` differs from `snapshot`, one `<ref> <created|moved|deleted>`
+ * per ref; empty when they agree. */
+function refDrift(snapshot: { heads: RefHead[]; tags: RefTag[] }, now: { heads: RefHead[]; tags: RefTag[] }): string[] {
+  const shaOf = (t: { heads: RefHead[]; tags: RefTag[] }) =>
+    new Map<string, string>([...t.heads.map((h): [string, string] => [h.ref, h.sha]), ...t.tags.map((g): [string, string] => [g.ref, g.tagObj])]);
+  const before = shaOf(snapshot);
+  const after = shaOf(now);
+  const out: string[] = [];
+  for (const [ref, sha] of before) {
+    if (!after.has(ref)) out.push(ref + ' deleted');
+    else if (after.get(ref) !== sha) out.push(ref + ' moved');
+  }
+  for (const ref of after.keys()) if (!before.has(ref)) out.push(ref + ' created');
+  return out;
+}
+
 function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: RewriteOpts): void {
   refuseOnMerge(repo, env);
+  /* ONE read of the refs (D20, Reviewer R1): the tag messages, the refs to
+   * move and their old values all come from this snapshot, taken before
+   * anything else is read. A ref that differs from it once the work is
+   * done is a refusal, and the transaction's old values cover the rest. */
+  const snapshot = refTips(repo, env);
   const commits = allRefCommitsTopoReverse(repo, env);
+  /* Every commit and annotated tag is re-created: UTF-8 only (D21, AC-95). */
+  refuseNonUtf8(repo, env, [
+    ...commits.map((c) => ({ sha: c, label: 'commit ' + c.slice(0, 7) })),
+    ...snapshot.tags.filter((t) => t.type === 'tag').map((t) => ({ sha: t.tagObj, label: 'tag ' + t.name })),
+  ]);
   const parentsOf: Record<string, string[]> = {};
   for (const c of commits) {
     const p = git.text(repo, ['log', '-1', '--format=%P', c], { env });
     parentsOf[c] = p ? p.split(' ') : [];
   }
+  const messages = tagMessages(repo, env, snapshot.tags);
 
   if (opts.refuseMessageChange) {
     for (const c of commits) {
@@ -299,12 +344,9 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
         throw new Refusal('commit ' + shortSha(repo, env, c) + ' message would change -- replace only rewrites file contents');
       }
     }
-    const { tags } = refTips(repo, env);
-    for (const t of tags) {
-      if (t.type !== 'tag') continue;
-      const msg = git.text(repo, ['for-each-ref', '--format=%(contents)', 'refs/tags/' + t.name], { env });
+    for (const [name, msg] of messages) {
       if (opts.applyToText!(msg) !== msg) {
-        throw new Refusal('tag ' + t.name + ' message would change -- replace only rewrites file contents');
+        throw new Refusal('tag ' + name + ' message would change -- replace only rewrites file contents');
       }
     }
   }
@@ -331,10 +373,18 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
     return;
   }
 
-  createBackupBundle(repo, env);
+  /* Every refusal before the backup bundle (§ 0, D20, AC-77): the
+   * signing key, and the transform's own refusal over every tree. */
+  if (opts.precheck) {
+    const seen = new Set<string>();
+    for (const c of commits) {
+      const tree = git.text(repo, ['rev-parse', c + '^{tree}'], { env });
+      if (!seen.has(tree)) { seen.add(tree); opts.precheck(tree); }
+    }
+  }
   const signer = createSigner(repo, env);
-  const tmpFiles: TmpMsg[] = [];
   try {
+    createBackupBundle(repo, env);
     /* Only now, after the backup bundle exists, do the actual (writing)
      * tree/blob computation -- § 4.1's "before changing anything" covers
      * objects, not just refs. */
@@ -357,31 +407,50 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
       remap.set(r.oldSha, nc);
     }
 
-    const { heads, tags } = refTips(repo, env);
+    /* Every object first (the commits above, every tag object here), then
+     * every ref in ONE transaction against its old value: a failure
+     * anywhere moves nothing (D20, AC-74). `git tag -f -s` per tag used to
+     * create the object and move its ref in one step, after the branches
+     * had already moved. A tag keeps its tagger line and its message byte
+     * for byte (AC-71). */
+    const { heads, tags } = snapshot;
+    const moves: git.RefMove[] = [];
     for (const h of heads) {
       const newSha = remap.get(h.sha);
-      if (newSha) git.text(repo, ['update-ref', 'refs/heads/' + h.name, newSha], { env });
+      if (newSha) moves.push({ ref: h.ref, newSha, oldSha: h.sha });
     }
     for (const t of tags) {
       const newCommit = remap.get(t.commit);
       if (!newCommit) continue;
+      let newObj = newCommit;
       if (t.type === 'tag') {
         const raw = git.text(repo, ['cat-file', '-p', t.tagObj], { env });
         const tm = /^tagger (.*) (\d+ [+-]\d{4})$/m.exec(raw)!;
-        const taggerIdent = splitIdent(tm[1]);
-        const msg = git.text(repo, ['for-each-ref', '--format=%(contents)', 'refs/tags/' + t.name], { env });
-        const tmp = writeTmpMsg(msg);
-        tmpFiles.push(tmp);
-        git.text(repo, ['tag', '-f', '-s', '-F', tmp.path, t.name, newCommit], {
-          env: Object.assign({}, env, {
-            GIT_COMMITTER_NAME: taggerIdent.name, GIT_COMMITTER_EMAIL: taggerIdent.email,
-            GIT_COMMITTER_DATE: '@' + tm[2],
-          }),
-          config: signer.gitConfig,
+        newObj = buildSignedTagObject(repo, env, signer, {
+          object: newCommit, type: 'commit', name: t.name, taggerLine: tm[1] + ' ' + tm[2], message: messages.get(t.name)!,
         });
-      } else {
-        git.text(repo, ['update-ref', 'refs/tags/' + t.name, newCommit], { env });
       }
+      moves.push({ ref: t.ref, newSha: newObj, oldSha: t.tagObj });
+    }
+    /* The drift check comes after the last tag is signed, right before the
+     * transaction (D20, Reviewer R1b): signing can take seconds (pinentry,
+     * a smartcard), and a ref created meanwhile is in neither the snapshot
+     * nor the transaction, so it would stay on the old history (AC-91). */
+    const drift = refDrift(snapshot, refTips(repo, env));
+    if (drift.length > 0) throw new Refusal('refs changed during the run (' + drift.join(', ') + '); nothing moved, run it again');
+    const txn = git.moveRefs(repo, env, bin + ' ' + sub, moves);
+    if (txn.status !== 0) throw new Refusal('ref update transaction failed: ' + (txn.stderr as string).trim().split('\n')[0]);
+    /* A ref created between that check and the transaction is not covered
+     * by either: name it, exit 1. A moved or deleted one fails the
+     * transaction's old values instead. */
+    const known = new Set([...heads.map((h) => h.ref), ...tags.map((t) => t.ref)]);
+    const after = refTips(repo, env);
+    const late = [...after.heads.map((h) => ({ ref: h.ref, target: h.sha })), ...after.tags.map((t) => ({ ref: t.ref, target: t.commit }))]
+      .filter((x) => !known.has(x.ref));
+    /* "still on the old history" only when it points at a commit this run
+     * rewrote (Reviewer's R1b nit N2). */
+    for (const x of late) {
+      process.stderr.write(bin + ': ' + x.ref + ' created during the run' + (remap.has(x.target) ? ', still on the old history' : '') + '\n');
     }
 
     const treeChecks = records.map((r) => ({
@@ -392,10 +461,9 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
     const results = [verify.verifyTreeDelta(treeChecks), verify.verifySignatures(repo, env)];
     if (opts.ruleSourcesCheck) results.push(verify.verifyRuleSourcesClean(opts.ruleSourcesCheck));
     for (const r of results) process.stdout.write(r.line + '\n');
-    process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
+    process.exitCode = results.some((r) => !r.ok) || late.length > 0 ? 1 : 0;
   } finally {
     signer.cleanup();
-    for (const t of tmpFiles) t.cleanup();
   }
 }
 
@@ -480,12 +548,14 @@ function cmdAddFile(bin: string, args: string[]): void {
     transformTree,
     changeLabel: 'would add/replace ' + asPath,
     ruleSourcesCheck: null,
+    precheck: (oldTree) => refuseDirectoryAt(repo, env, oldTree, segments, asPath),
   });
 }
 
 main('git-history-rewrite', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' replace|add-file <repo> ...)');
   if (sub === 'replace') return cmdReplace(bin, rest);
   if (sub === 'add-file') return cmdAddFile(bin, rest);
   throw new UsageError('unknown subcommand \'' + sub + '\'');

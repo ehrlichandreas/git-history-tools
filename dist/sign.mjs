@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 // lib/sign.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import os3 from "node:os";
-import path5 from "node:path";
-import { spawnSync as spawnSync4 } from "node:child_process";
+import path6 from "node:path";
 
 // lib/git.ts
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 var GitError = class extends Error {
   args;
   result;
@@ -17,10 +17,51 @@ var GitError = class extends Error {
     this.result = result;
   }
 };
+var CALLER_GIT_ENV = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR"
+];
+function callerGitEnvNames(env) {
+  return Object.keys(env).filter((k) => CALLER_GIT_ENV.includes(k) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k));
+}
+var IDENTITY_KEYS = ["user.name", "user.email", "user.signingkey"];
+function callerIdentityConfig(env) {
+  const n = parseInt(env.GIT_CONFIG_COUNT || "", 10);
+  const out = [];
+  for (let i = 0; i < (n > 0 ? n : 0); i++) {
+    const k = env["GIT_CONFIG_KEY_" + i];
+    const v = env["GIT_CONFIG_VALUE_" + i];
+    if (k !== void 0 && v !== void 0 && IDENTITY_KEYS.includes(k.toLowerCase())) out.push([k, v]);
+  }
+  return out;
+}
+function configCountEnv(pairs) {
+  if (pairs.length === 0) return {};
+  return Object.assign(
+    { GIT_CONFIG_COUNT: String(pairs.length) },
+    ...pairs.map(([k, v], i) => ({ ["GIT_CONFIG_KEY_" + i]: k, ["GIT_CONFIG_VALUE_" + i]: v }))
+  );
+}
+var NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 function run(repo, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env, o.env || {});
-  const pre = o.config || [];
+  for (const k of CALLER_GIT_ENV) if (k !== "GIT_CONFIG_COUNT") delete env[k];
+  env.GIT_NO_REPLACE_OBJECTS = "1";
+  const pre = NO_REPO_CODE.concat(o.config || []);
   const r = spawnSync("git", ["-C", repo].concat(pre, args), {
     env,
     input: o.input,
@@ -47,6 +88,27 @@ function isRepo(dir) {
   const r = run(dir, ["rev-parse", "--git-dir"]);
   return r.status === 0;
 }
+function topLevel(dir) {
+  const b = run(dir, ["rev-parse", "--is-bare-repository", "--absolute-git-dir", "--is-inside-git-dir"]);
+  if (b.status !== 0) return null;
+  const [bare, gitDir, insideGitDir] = b.stdout.split("\n");
+  if (bare === "true") return gitDir;
+  if (insideGitDir === "true") {
+    const wt = run(gitDir, ["config", "--get", "core.worktree"]);
+    if (wt.status === 0) return path.resolve(gitDir, wt.stdout.replace(/\n$/, ""));
+    return path.basename(gitDir) === ".git" ? path.dirname(gitDir) : null;
+  }
+  const t = run(dir, ["rev-parse", "--show-toplevel"]);
+  return t.status === 0 ? t.stdout.replace(/\n$/, "") : null;
+}
+function refBase(ref, namespace) {
+  if (!ref.startsWith(namespace)) throw new Error("refBase: " + ref + " is not under " + namespace);
+  return ref.slice(namespace.length);
+}
+function isValidTagName(name) {
+  if (name === "" || name.startsWith("-")) return false;
+  return spawnSync("git", ["check-ref-format", "refs/tags/" + name], { encoding: "utf8" }).status === 0;
+}
 function configGet(repo, key, opts) {
   const r = run(repo, ["config", "--get", key], opts);
   if (r.status !== 0) return null;
@@ -54,7 +116,7 @@ function configGet(repo, key, opts) {
 }
 
 // lib/cli.ts
-import path from "node:path";
+import path2 from "node:path";
 import fs from "node:fs";
 var UsageError = class extends Error {
 };
@@ -92,11 +154,22 @@ function parseFlags(args, spec) {
   }
   return { positional, flags };
 }
+function requireRepo(repo) {
+  if (!isRepo(repo)) throw new Refusal("not a git repository (" + repo + ")");
+  const top = topLevel(repo);
+  if (top === null || fs.realpathSync(top) !== fs.realpathSync(repo)) {
+    throw new Refusal("not the top level of its repository (" + repo + "; the top level is " + (top === null ? "unknown" : fs.realpathSync(top)) + ")");
+  }
+}
 function isInsideRepo(realRepo, candidate) {
-  const rel = path.relative(realRepo, candidate);
-  return rel === "" || !rel.startsWith("..") && !path.isAbsolute(rel);
+  const rel = path2.relative(realRepo, candidate);
+  return rel === "" || !rel.startsWith("..") && !path2.isAbsolute(rel);
 }
 function main(bin, fn) {
+  const identity = callerIdentityConfig(process.env);
+  for (const k of callerGitEnvNames(process.env)) delete process.env[k];
+  Object.assign(process.env, configCountEnv(identity));
+  process.env.GIT_NO_REPLACE_OBJECTS = "1";
   try {
     fn(bin);
   } catch (e) {
@@ -112,16 +185,50 @@ function main(bin, fn) {
   }
 }
 
+// lib/encoding.ts
+var UTF8 = new TextDecoder("utf-8", { fatal: true });
+function nonUtf8Reason(raw) {
+  const end = raw.indexOf("\n\n");
+  const head = (end === -1 ? raw : raw.subarray(0, end)).toString("latin1");
+  const m = /^encoding (.*)$/m.exec(head);
+  if (m && !/^utf-?8$/i.test(m[1].trim())) return "encoding " + m[1].trim();
+  try {
+    UTF8.decode(raw);
+  } catch {
+    return "bytes that are not valid UTF-8 in its message or identity";
+  }
+  return null;
+}
+function refuseNonUtf8(repo, env, objects) {
+  const seen = /* @__PURE__ */ new Set();
+  const list = objects.filter((o) => !seen.has(o.sha) && seen.add(o.sha));
+  if (list.length === 0) return;
+  const out = buffer(repo, ["cat-file", "--batch"], { env, input: list.map((o) => o.sha).join("\n") + "\n" });
+  let pos = 0;
+  for (const o of list) {
+    const nl = out.indexOf(10, pos);
+    const size = Number(out.subarray(pos, nl).toString("latin1").split(" ")[2]);
+    const why = nonUtf8Reason(out.subarray(nl + 1, nl + 1 + size));
+    if (why) throw new UsageError(o.label + " is not UTF-8 (" + why + "); ght rewrites UTF-8 objects only, nothing written");
+    pos = nl + 1 + size + 1;
+  }
+}
+
 // lib/signer.ts
 import fs2 from "node:fs";
 import os from "node:os";
-import path2 from "node:path";
+import path3 from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
+var PIN_OTHER_SIGNERS = [
+  ["gpg.format", "openpgp"],
+  ["gpg.ssh.program", ""],
+  ["gpg.x509.program", ""]
+];
 function shQuote(s) {
   return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 function keyCreationTime(gpgProgram, signingKey, env) {
-  const r = spawnSync2(gpgProgram, ["--batch", "--list-keys", "--with-colons", signingKey], { env, encoding: "utf8" });
+  const r = spawnSync2(gpgProgram, ["--batch", "--list-keys", "--with-colons", "--", signingKey], { env, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Refusal("could not read the signing key (" + signingKey + ") via " + gpgProgram + " --list-keys: " + (r.stderr || "").trim());
   }
@@ -137,12 +244,15 @@ function createSigner(repo, env, opts) {
   const explicitKey = opts && opts.signingKey;
   const signingKey = explicitKey || configGet(repo, "user.signingkey", { env });
   if (!signingKey) throw new Refusal("no user.signingkey configured for " + repo);
+  if (signingKey.startsWith("-")) {
+    throw new UsageError('user.signingkey "' + signingKey + '" starts with "-", which gpg would read as an option; nothing written');
+  }
   const created = keyCreationTime(gpgProgram, signingKey, env);
   const signTime = opts && opts.signTime !== void 0 ? opts.signTime : created + 60;
-  const dir = fs2.mkdtempSync(path2.join(os.tmpdir(), "ght-signer-"));
+  const dir = fs2.mkdtempSync(path3.join(os.tmpdir(), "ght-signer-"));
   let wrapperPath;
   try {
-    wrapperPath = path2.join(dir, "gpg-wrapper.sh");
+    wrapperPath = path3.join(dir, "gpg-wrapper.sh");
     fs2.writeFileSync(
       wrapperPath,
       "#!/bin/sh\nexec " + shQuote(gpgProgram) + " --faked-system-time " + signTime + '! "$@"\n'
@@ -155,7 +265,7 @@ function createSigner(repo, env, opts) {
     }
     throw e;
   }
-  const gitConfig = ["-c", "gpg.program=" + wrapperPath];
+  const gitConfig = ["-c", "gpg.program=" + wrapperPath].concat(PIN_OTHER_SIGNERS.flatMap(([k, v]) => ["-c", k + "=" + v]));
   if (explicitKey) gitConfig.push("-c", "user.signingkey=" + explicitKey);
   return {
     gitConfig,
@@ -170,19 +280,48 @@ function createSigner(repo, env, opts) {
     }
   };
 }
+function signTagTextDetached(signer, env, text2) {
+  const r = spawnSync2(signer.gpgProgram, ["--batch", "--status-fd=2", "-bsau", signer.signingKey], {
+    env,
+    input: text2,
+    encoding: "utf8"
+  });
+  if (r.status !== 0) {
+    throw new Refusal("failed to sign tag object: " + (r.stderr || "").trim().split("\n").pop());
+  }
+  return r.stdout;
+}
+function signableTagMessage(message) {
+  return message !== "" && !message.endsWith("\n") ? message + "\n" : message;
+}
+function buildSignedTagObject(repo, env, signer, args) {
+  const text2 = "object " + args.object + "\ntype " + args.type + "\ntag " + args.name + "\ntagger " + args.taggerLine + "\n\n" + signableTagMessage(args.message);
+  const sig = signTagTextDetached(signer, env, text2);
+  const full = text2 + sig;
+  const r = run(repo, ["hash-object", "-t", "tag", "-w", "--stdin"], { env, input: full });
+  if (r.status !== 0) {
+    throw new Refusal("failed to write tag object for " + args.name + ": " + r.stderr.trim().split("\n")[0]);
+  }
+  return r.stdout.trim();
+}
 
 // lib/bundle.ts
-import path3 from "node:path";
+import fs3 from "node:fs";
+import path4 from "node:path";
 function utcStamp(d) {
   const p = (n, w) => String(n).padStart(w || 2, "0");
   return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + "T" + p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + "Z";
 }
 function createBackupBundle(repo, env) {
-  const absRepo = path3.resolve(repo);
-  const base = path3.basename(absRepo);
-  const dir = path3.dirname(absRepo);
+  const top = topLevel(repo);
+  if (top === null || fs3.realpathSync(top) !== fs3.realpathSync(repo)) {
+    throw new Error("createBackupBundle: " + repo + " is not the top level of its repository");
+  }
+  const absRepo = fs3.realpathSync(top);
+  const base = path4.basename(absRepo);
+  const dir = path4.dirname(absRepo);
   const stamp = utcStamp(/* @__PURE__ */ new Date());
-  const bundlePath = path3.join(dir, base + ".backup-" + stamp + ".bundle");
+  const bundlePath = path4.join(dir, base + ".backup-" + stamp + ".bundle");
   text(repo, ["bundle", "create", bundlePath, "--all"], { env });
   return bundlePath;
 }
@@ -204,13 +343,13 @@ function verifyTreeDelta(checks) {
 }
 
 // lib/policy.ts
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import os2 from "node:os";
-import path4 from "node:path";
+import path5 from "node:path";
 var DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 var TOP_REQUIRED = ["identity", "signingKey", "timezone", "forbiddenWindows", "forbiddenMessagePatterns"];
 var TOP_OPTIONAL = ["anonymousBefore", "gpgProgram"];
-var IDENTITY_KEYS = ["name", "email"];
+var IDENTITY_KEYS2 = ["name", "email"];
 var WINDOW_KEYS = ["days", "from", "to"];
 function fail(file, reason) {
   throw new Refusal("policy " + file + ": " + reason);
@@ -237,7 +376,7 @@ function validIanaTimezone(tz) {
 }
 function validateIdentity(file, v) {
   if (!isPlainObject(v)) fail(file, "'identity' must be an object");
-  checkKeys(file, v, IDENTITY_KEYS, "identity");
+  checkKeys(file, v, IDENTITY_KEYS2, "identity");
   if (typeof v.name !== "string" || v.name === "") fail(file, "'identity.name' must be a non-empty string");
   if (typeof v.email !== "string" || v.email === "") fail(file, "'identity.email' must be a non-empty string");
   return { name: v.name, email: v.email };
@@ -292,16 +431,16 @@ function validateAnonymousBefore(file, v) {
 }
 function validateGpgProgram(file, v) {
   if (v === void 0) return void 0;
-  if (typeof v !== "string" || !path4.isAbsolute(v)) fail(file, "'gpgProgram' must be an absolute path (got " + JSON.stringify(v) + ")");
+  if (typeof v !== "string" || !path5.isAbsolute(v)) fail(file, "'gpgProgram' must be an absolute path (got " + JSON.stringify(v) + ")");
   let st;
   try {
-    st = fs3.statSync(v);
+    st = fs4.statSync(v);
   } catch (e) {
     fail(file, "'gpgProgram' does not exist: " + v);
   }
   if (!st.isFile()) fail(file, "'gpgProgram' is not a file: " + v);
   try {
-    fs3.accessSync(v, fs3.constants.X_OK);
+    fs4.accessSync(v, fs4.constants.X_OK);
   } catch (e) {
     fail(file, "'gpgProgram' is not executable: " + v);
   }
@@ -324,23 +463,23 @@ function validatePolicy(parsed, file) {
   return policy;
 }
 function defaultPolicyPath(env) {
-  const base = env.XDG_CONFIG_HOME || path4.join(env.HOME || os2.homedir(), ".config");
-  return path4.join(base, "git-history-tools", "policy.json");
+  const base = env.XDG_CONFIG_HOME || path5.join(env.HOME || os2.homedir(), ".config");
+  return path5.join(base, "git-history-tools", "policy.json");
 }
 function loadPolicy(repo, explicitPath, env) {
   const file = explicitPath !== void 0 ? explicitPath : defaultPolicyPath(env);
-  if (!fs3.existsSync(file)) throw new Refusal("policy file not found: " + file);
-  const abs = path4.resolve(file);
-  const realRepo = fs3.realpathSync(repo);
-  const realDir = fs3.realpathSync(path4.dirname(abs));
-  const realFileShallow = path4.join(realDir, path4.basename(abs));
-  const realFileFull = fs3.realpathSync(abs);
+  if (!fs4.existsSync(file)) throw new Refusal("policy file not found: " + file);
+  const abs = path5.resolve(file);
+  const realRepo = fs4.realpathSync(repo);
+  const realDir = fs4.realpathSync(path5.dirname(abs));
+  const realFileShallow = path5.join(realDir, path5.basename(abs));
+  const realFileFull = fs4.realpathSync(abs);
   if (isInsideRepo(realRepo, realFileShallow) || isInsideRepo(realRepo, realFileFull)) {
     throw new Refusal("--policy points inside the repo (" + file + ") -- keep it outside");
   }
   let raw;
   try {
-    raw = fs3.readFileSync(realFileFull, "utf8");
+    raw = fs4.readFileSync(realFileFull, "utf8");
   } catch (e) {
     throw new Refusal("policy " + file + ": cannot read (" + e.message + ")");
   }
@@ -490,6 +629,12 @@ function tagSignatureBoundary(raw) {
   }
   return { index, count };
 }
+function tagMessageFromRaw(raw) {
+  const idx = raw.indexOf("\n\n");
+  const rest = idx === -1 ? "" : raw.slice(idx + 2);
+  const { index: sigIdx } = tagSignatureBoundary(rest);
+  return sigIdx === -1 ? rest : rest.slice(0, sigIdx);
+}
 function signatureBlockCount(raw, kind) {
   if (kind === "tag") return tagSignatureBoundary(raw).count;
   const headerEnd = raw.indexOf("\n\n");
@@ -550,33 +695,35 @@ function keyMatches(full, reported) {
 }
 
 // lib/sign.ts
-function requireRepo(repo) {
-  if (!isRepo(repo)) throw new Refusal("not a git repository (" + repo + ")");
-}
-function resolveRevList(repo, env, args, label) {
-  const r = run(repo, ["rev-list"].concat(args), { env });
+function resolveRevList(repo, env, opts, revs, label) {
+  const r = run(repo, ["rev-list"].concat(opts, ["--end-of-options"], revs), { env });
   if (r.status !== 0) throw new Refusal("invalid revision range '" + label + "'");
   const out = r.stdout.replace(/\n$/, "");
   return out ? out.split("\n") : [];
+}
+function refuseOptionLikeRange(range) {
+  if (range.split(/\.{2,3}/).some((side) => side.startsWith("-"))) {
+    throw new UsageError("<range> '" + range + "': a revision must not start with '-'");
+  }
 }
 function splitIdent(s) {
   const m = /^(.*) <([^>]*)>$/.exec(s);
   return m ? { name: m[1], email: m[2] } : { name: s, email: "" };
 }
 function writeTmpMsg(msg) {
-  const dir = fs4.mkdtempSync(path5.join(os3.tmpdir(), "ght-signmsg-"));
+  const dir = fs5.mkdtempSync(path6.join(os3.tmpdir(), "ght-signmsg-"));
   try {
-    const p = path5.join(dir, "msg.txt");
-    fs4.writeFileSync(p, msg);
+    const p = path6.join(dir, "msg.txt");
+    fs5.writeFileSync(p, msg);
     return { path: p, cleanup() {
       try {
-        fs4.rmSync(dir, { recursive: true, force: true });
+        fs5.rmSync(dir, { recursive: true, force: true });
       } catch (e) {
       }
     } };
   } catch (e) {
     try {
-      fs4.rmSync(dir, { recursive: true, force: true });
+      fs5.rmSync(dir, { recursive: true, force: true });
     } catch (e2) {
     }
     throw e;
@@ -585,7 +732,9 @@ function writeTmpMsg(msg) {
 function policyContext(repo, flags) {
   const policy = loadPolicy(repo, flags.policy, process.env);
   const gpgProgram = policy.gpgProgram || "gpg";
-  return { policy, gpgProgram, env: withGitConfig(process.env, "gpg.program", gpgProgram) };
+  let env = withGitConfig(process.env, "gpg.program", gpgProgram);
+  for (const [k, v] of PIN_OTHER_SIGNERS) env = withGitConfig(env, k, v);
+  return { policy, gpgProgram, env };
 }
 function withGitConfig(env, key, value) {
   const n = parseInt(env.GIT_CONFIG_COUNT || "0", 10) || 0;
@@ -608,7 +757,7 @@ function resolveMessage(flags) {
   if (hasMessage === hasMessageFile) throw new UsageError("exactly one of --message or --message-file is required");
   if (hasMessage) return flags.message;
   const file = flags["message-file"];
-  return file === "-" ? fs4.readFileSync(0, "utf8") : fs4.readFileSync(file, "utf8");
+  return file === "-" ? fs5.readFileSync(0, "utf8") : fs5.readFileSync(file, "utf8");
 }
 var DATE_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:?\d{2})?$/;
 function normaliseOffset(off) {
@@ -743,6 +892,7 @@ function cmdTag(bin, args) {
   if (!repo) throw new UsageError("missing <repo>");
   if (!tagName) throw new UsageError("missing <tag>");
   if (positional.length > 2) throw new UsageError("unexpected argument: " + positional[2]);
+  if (!isValidTagName(tagName)) throw new UsageError("<tag>: " + JSON.stringify(tagName) + " is not a valid tag name");
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
   const message = resolveMessage(flags);
@@ -787,50 +937,29 @@ function cmdTag(bin, args) {
 function annotatedTags(repo, env) {
   const out = text(
     repo,
-    ["for-each-ref", "--format=%(refname:short)	%(objecttype)	%(objectname)	%(*objectname)", "refs/tags"],
+    ["for-each-ref", "--format=%(refname)	%(objecttype)	%(objectname)	%(*objectname)", "refs/tags"],
     { env }
   );
   if (!out) return [];
   return out.split("\n").map((l) => {
-    const [name, type, obj, deref] = l.split("	");
-    return { name, type, obj, commit: type === "tag" ? deref : obj };
+    const [ref, type, obj, deref] = l.split("	");
+    return { name: refBase(ref, "refs/tags/"), type, obj, commit: type === "tag" ? deref : obj };
   });
 }
 function stripSignature(raw) {
   const { index } = tagSignatureBoundary(raw.toString("latin1"));
   return index === -1 ? raw : raw.subarray(0, index);
 }
-function tagMessageFromRaw(raw) {
-  const idx = raw.indexOf("\n\n");
-  const rest = idx === -1 ? "" : raw.slice(idx + 2);
-  const { index: sigIdx } = tagSignatureBoundary(rest);
-  return sigIdx === -1 ? rest : rest.slice(0, sigIdx);
-}
 function independentOldTagMessage(message, oldSigCount) {
   if (oldSigCount !== 1) return message;
   const m = /\n?(-----BEGIN (?:PGP|SSH) SIGNATURE-----\n(?:(?!-----END (?:PGP|SSH) SIGNATURE-----)[\s\S])*\n-----END (?:PGP|SSH) SIGNATURE-----\n?)$/.exec(message);
   return m ? message.slice(0, m.index) : message;
 }
-function signTagTextDetached(signer, env, text2) {
-  const r = spawnSync4(signer.gpgProgram, ["--batch", "--status-fd=2", "-bsau", signer.signingKey], {
-    env,
-    input: text2,
-    encoding: "utf8"
-  });
-  if (r.status !== 0) {
-    throw new Refusal("failed to sign tag object: " + (r.stderr || "").trim().split("\n").pop());
-  }
-  return r.stdout;
-}
-function buildSignedTagObject(repo, env, signer, args) {
-  const text2 = "object " + args.object + "\ntype " + args.type + "\ntag " + args.name + "\ntagger " + args.taggerLine + "\n\n" + args.message;
-  const sig = signTagTextDetached(signer, env, text2);
-  const full = text2 + sig;
-  const r = run(repo, ["hash-object", "-t", "tag", "-w", "--stdin"], { env, input: full });
-  if (r.status !== 0) {
-    throw new Refusal("resign: failed to write tag object for " + args.name + ": " + r.stderr.trim().split("\n")[0]);
-  }
-  return r.stdout.trim();
+function refuseAmbiguousTag(repo, env, policy, t, label) {
+  const raw = buffer(repo, ["cat-file", "-p", t.obj], { env }).toString("utf8");
+  if (signatureBlockCount(raw, "tag") !== 1) return;
+  if (signatureStatus(repo, env, "tag", "refs/tags/" + t.name, true, policy.signingKey).state !== "bad") return;
+  throw new Refusal(label + " ends with a signature-shaped block gpg cannot verify or attribute to any key -- indistinguishable from an unsigned tag whose message merely ends with a quoted block; refusing to guess, resolve manually");
 }
 function cmdResignTags(bin, args) {
   const { positional, flags } = parseFlags(args, { valueFlags: ["--policy"], boolFlags: ["--apply"] });
@@ -859,10 +988,11 @@ function cmdResignTags(bin, args) {
         skippedLightweight.push(t.name);
         continue;
       }
-      const fp = verifiedKeyFingerprint(repo, env, "tag", t.name);
+      const fp = verifiedKeyFingerprint(repo, env, "tag", "refs/tags/" + t.name);
       if (!keyMatches(policy.signingKey, fp)) candidates.push(t);
     }
   }
+  refuseNonUtf8(repo, env, candidates.map((t) => ({ sha: t.obj, label: "tag " + t.name })));
   const lines = [];
   for (const n of skippedLightweight) lines.push("resign-tags: " + n + " is lightweight, skipped");
   if (candidates.length === 0) {
@@ -873,8 +1003,8 @@ function cmdResignTags(bin, args) {
   if (!flags.apply) {
     for (const t of candidates) {
       lines.push("resign-tags: " + t.name + " would be re-signed");
-      const hasSig = extractSignature(repo, env, "tag", t.name) !== null;
-      const status = signatureStatus(repo, env, "tag", t.name, hasSig, policy.signingKey);
+      const hasSig = extractSignature(repo, env, "tag", "refs/tags/" + t.name) !== null;
+      const status = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, hasSig, policy.signingKey);
       const key = unverifiableKeyLabel(status);
       if (key) lines.push("resign-tags: " + t.name + " would replace unverifiable signature (key " + key + ")");
     }
@@ -882,6 +1012,8 @@ function cmdResignTags(bin, args) {
     process.stdout.write(bin + ": dry run, no ref changed (use --apply to write)\n");
     return;
   }
+  keyCreationTime(gpgProgram, policy.signingKey, env);
+  for (const t of candidates) refuseAmbiguousTag(repo, env, policy, t, t.name);
   createBackupBundle(repo, env);
   const results = [];
   {
@@ -893,7 +1025,7 @@ function cmdResignTags(bin, args) {
       const msg = tagMessageFromRaw(raw);
       const oldSigCount = signatureBlockCount(raw, "tag");
       const hasSig = oldSigCount === 1;
-      const oldStatus = signatureStatus(repo, env, "tag", t.name, hasSig, policy.signingKey);
+      const oldStatus = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, hasSig, policy.signingKey);
       if (hasSig && oldStatus.state === "bad") {
         throw new Refusal(t.name + " ends with a signature-shaped block gpg cannot verify or attribute to any key -- indistinguishable from an unsigned tag whose message merely ends with a quoted block; refusing to guess, resolve manually");
       }
@@ -934,11 +1066,14 @@ function cmdResignTags(bin, args) {
       const oldBody = stripSignature(buffer(repo, ["cat-file", "-p", r.oldSha], { env }));
       const newRawBuf = buffer(repo, ["cat-file", "-p", r.newSha], { env });
       const newBody = stripSignature(newRawBuf);
-      const bodyOk = oldBody.equals(newBody);
+      const oldText = oldBody.toString("latin1");
+      const sep = oldText.indexOf("\n\n");
+      const expectedBody = sep === -1 ? oldText : oldText.slice(0, sep + 2) + signableTagMessage(oldText.slice(sep + 2));
+      const bodyOk = expectedBody === newBody.toString("latin1");
       const newRaw = newRawBuf.toString("utf8");
       const sigBlocksOk = signatureBlockCount(newRaw, "tag") === 1;
       const messageIndependentOk = tagMessageFromRaw(newRaw).replace(/\n*$/, "") === r.independentOldMsg.replace(/\n*$/, "");
-      const verifyOk = run(repo, ["tag", "-v", r.name], { env }).status === 0;
+      const verifyOk = run(repo, ["verify-tag", "refs/tags/" + r.name], { env }).status === 0;
       const ok = sameTarget && bodyOk && sigBlocksOk && messageIndependentOk && verifyOk;
       if (!ok) allOk = false;
       lines.push("verify: " + r.name + ": " + (ok ? "OK" : "FAILED (" + (!sameTarget ? "target changed" : !bodyOk || !messageIndependentOk ? "tagger/message changed" : !sigBlocksOk ? "multiple-signatures" : "signature not accepted") + ")"));
@@ -1041,7 +1176,7 @@ function checkOneTag(repo, env, t, policy, gpgProgram) {
     out.push(t.name + " signature multiple-signatures (" + sigBlocks + " signature blocks found)");
   } else {
     const sig = extractSignature(repo, env, "tag", t.obj);
-    const status = signatureStatus(repo, env, "tag", t.name, sig !== null, policy.signingKey);
+    const status = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, sig !== null, policy.signingKey);
     if (status.state !== "ok") {
       out.push(t.name + " signature " + signatureDetail(status));
     } else if (sig) {
@@ -1065,6 +1200,8 @@ function cmdCheck(bin, args) {
   if (positionalRange !== void 0 && flags.range !== void 0) {
     throw new UsageError("give the revision range either positionally or as --range, not both");
   }
+  const givenRange = positionalRange !== void 0 ? positionalRange : flags.range;
+  if (givenRange !== void 0) refuseOptionLikeRange(givenRange);
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
   let range = positionalRange !== void 0 ? positionalRange : flags.range;
@@ -1073,7 +1210,7 @@ function cmdCheck(bin, args) {
     if (up.status !== 0) throw new Refusal("no upstream configured for HEAD -- pass --range explicitly (or as a positional argument)");
     range = "@{upstream}..HEAD";
   }
-  const commits = resolveRevList(repo, env, ["--reverse", range], range);
+  const commits = resolveRevList(repo, env, ["--reverse"], [range], range);
   const lines = [];
   for (const c of commits) lines.push(...checkOneCommit(repo, env, c, policy, gpgProgram));
   let tagCount = 0;
@@ -1184,16 +1321,16 @@ function verifyNewSignatures(repo, env, gpgProgram, policy, pairs, movedTagNames
   return { ok: true, line: "verify: resign-commits: check (signature/sig-time): OK" };
 }
 function checkMapOutOutsideRepo(repo, filePath) {
-  const abs = path5.resolve(filePath);
-  const realRepo = fs4.realpathSync(repo);
-  const parentDir = path5.dirname(abs);
+  const abs = path6.resolve(filePath);
+  const realRepo = fs5.realpathSync(repo);
+  const parentDir = path6.dirname(abs);
   let realParent;
   try {
-    realParent = fs4.realpathSync(parentDir);
+    realParent = fs5.realpathSync(parentDir);
   } catch (e) {
     throw new UsageError("--map-out: directory does not exist: " + parentDir);
   }
-  const realFileShallow = path5.join(realParent, path5.basename(abs));
+  const realFileShallow = path6.join(realParent, path6.basename(abs));
   if (isInsideRepo(realRepo, realFileShallow)) throw new Refusal("--map-out points inside the repo (" + filePath + ") -- keep it outside");
 }
 function cmdResignCommits(bin, args) {
@@ -1216,16 +1353,17 @@ function cmdResignCommits(bin, args) {
   if (dotdot !== -1 && fromRoot) {
     throw new UsageError("--from-root takes a bare <rev>, not a range ('" + range + "')");
   }
+  refuseOptionLikeRange(range);
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
   if (flags["map-out"] !== void 0) checkMapOutOutsideRepo(repo, flags["map-out"]);
   let lowerSha = null;
   if (lower) {
-    const lowerR = run(repo, ["rev-parse", "--verify", "--quiet", lower + "^{commit}"], { env });
+    const lowerR = run(repo, ["rev-parse", "--verify", "--quiet", "--end-of-options", lower + "^{commit}"], { env });
     if (lowerR.status !== 0) throw new Refusal("invalid revision range '" + range + "'");
     lowerSha = lowerR.stdout.replace(/\n$/, "");
   }
-  const upperR = run(repo, ["rev-parse", "--verify", "--quiet", upper + "^{commit}"], { env });
+  const upperR = run(repo, ["rev-parse", "--verify", "--quiet", "--end-of-options", upper + "^{commit}"], { env });
   if (upperR.status !== 0) throw new Refusal("invalid revision range '" + range + "'");
   const upperSha = upperR.stdout.replace(/\n$/, "");
   if (lowerSha) {
@@ -1234,10 +1372,14 @@ function cmdResignCommits(bin, args) {
       throw new Refusal("invalid revision range '" + range + "': " + upper + " is not a descendant of " + lower);
     }
   }
-  const inRange = new Set(resolveRevList(repo, env, [range], range));
-  const candidateArgs = ["--topo-order", "--reverse", "--parents", "--branches", "--tags"];
-  if (lowerSha) candidateArgs.push("^" + lowerSha);
-  const candidateLines = resolveRevList(repo, env, candidateArgs, range);
+  const inRange = new Set(resolveRevList(repo, env, [], [range], range));
+  const candidateLines = resolveRevList(
+    repo,
+    env,
+    ["--topo-order", "--reverse", "--parents", "--branches", "--tags"],
+    lowerSha ? ["^" + lowerSha] : [],
+    range
+  );
   const rewriteSet = /* @__PURE__ */ new Set();
   const toRewrite = [];
   for (const line2 of candidateLines) {
@@ -1254,13 +1396,17 @@ function cmdResignCommits(bin, args) {
       throw new Refusal(p.sha.slice(0, 7) + " author/committer is not the policy identity -- identities are never changed here");
     }
   }
-  const branchesRaw = text(repo, ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], { env });
+  const branchesRaw = text(repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"], { env });
   const branches = branchesRaw ? branchesRaw.split("\n").map((l) => {
     const sp = l.indexOf(" ");
-    return { name: l.slice(0, sp), sha: l.slice(sp + 1) };
+    return { name: refBase(l.slice(0, sp), "refs/heads/"), sha: l.slice(sp + 1) };
   }) : [];
   const affectedBranches = branches.filter((b) => rewriteSet.has(b.sha));
   const affectedTags = annotatedTags(repo, env).filter((t) => rewriteSet.has(t.commit));
+  refuseNonUtf8(repo, env, [
+    ...toRewrite.map((c) => ({ sha: c, label: "commit " + c.slice(0, 7) })),
+    ...affectedTags.filter((t) => t.type === "tag").map((t) => ({ sha: t.obj, label: "tag " + t.name }))
+  ]);
   if (!flags.apply) {
     if (fromRoot) process.stdout.write("resign-commits: root-inclusive: " + toRewrite.length + " commits\n");
     for (const sha of toRewrite) {
@@ -1274,14 +1420,44 @@ function cmdResignCommits(bin, args) {
     for (const t of affectedTags) {
       process.stdout.write("resign-commits: tag " + t.name + (t.type === "tag" ? " would be re-signed and moved" : " would be moved") + "\n");
       if (t.type === "tag") {
-        const hasSig = extractSignature(repo, env, "tag", t.name) !== null;
-        const status = signatureStatus(repo, env, "tag", t.name, hasSig, policy.signingKey);
+        const hasSig = extractSignature(repo, env, "tag", "refs/tags/" + t.name) !== null;
+        const status = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, hasSig, policy.signingKey);
         const key = unverifiableKeyLabel(status);
         if (key) process.stdout.write("resign-commits: tag " + t.name + " would replace unverifiable signature (key " + key + ")\n");
       }
     }
     process.stdout.write(bin + ": dry run, no ref changed, no objects written (use --apply to write)\n");
     return;
+  }
+  keyCreationTime(gpgProgram, policy.signingKey, env);
+  {
+    const targets = /* @__PURE__ */ new Map();
+    for (const t of affectedTags) {
+      if (t.type !== "tag") continue;
+      const raw = buffer(repo, ["cat-file", "-p", t.obj], { env }).toString("utf8");
+      const om = /^object ([0-9a-f]{40})$/m.exec(raw);
+      const tym = /^type (\S+)$/m.exec(raw);
+      if (!om || !tym) throw new Refusal("tag " + t.name + ": malformed tag object");
+      if (tym[1] !== "commit" && tym[1] !== "tag") {
+        throw new Refusal("tag " + t.name + " points at a " + tym[1] + ", not a commit or tag -- not supported");
+      }
+      refuseAmbiguousTag(repo, env, policy, t, "tag " + t.name);
+      targets.set(t.name, { type: tym[1], obj: om[1] });
+    }
+    const done = /* @__PURE__ */ new Set();
+    const pending = new Set(targets.keys());
+    let progressed = true;
+    while (pending.size > 0 && progressed) {
+      progressed = false;
+      for (const t of affectedTags) {
+        const target = targets.get(t.name);
+        if (!target || !pending.has(t.name) || target.type === "tag" && !done.has(target.obj)) continue;
+        done.add(t.obj);
+        pending.delete(t.name);
+        progressed = true;
+      }
+    }
+    if (pending.size > 0) throw new Refusal("could not resolve tag dependency order for: " + Array.from(pending).join(", "));
   }
   createBackupBundle(repo, env);
   const signers = [];
@@ -1355,7 +1531,7 @@ function cmdResignCommits(bin, args) {
         const taggerEpoch = parseInt(tm[2], 10);
         const msg = tagMessageFromRaw(raw);
         const hasSig = signatureBlockCount(raw, "tag") === 1;
-        const oldStatus = signatureStatus(repo, env, "tag", t.name, hasSig, policy.signingKey);
+        const oldStatus = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, hasSig, policy.signingKey);
         if (hasSig && oldStatus.state === "bad") {
           throw new Refusal("tag " + t.name + " ends with a signature-shaped block gpg cannot verify or attribute to any key -- indistinguishable from an unsigned tag whose message merely ends with a quoted block; refusing to guess, resolve manually");
         }
@@ -1395,7 +1571,7 @@ function cmdResignCommits(bin, args) {
     }
     if (flags["map-out"]) {
       const mapLines = pairs.map((p) => p.old + " " + p.nw).concat(tagResults.map((r) => r.oldSha + " " + r.newSha));
-      fs4.writeFileSync(flags["map-out"], mapLines.length ? mapLines.join("\n") + "\n" : "");
+      fs5.writeFileSync(flags["map-out"], mapLines.length ? mapLines.join("\n") + "\n" : "");
     }
     const movedTagNames = new Set(affectedTags.map((t) => t.name));
     const results = [

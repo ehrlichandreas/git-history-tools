@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, isInsideRepo, main } from './cli.ts';
-import { createSigner, keyCreationTime } from './signer.ts';
-import type { Signer } from './signer.ts';
+import { UsageError, Refusal, parseFlags, isInsideRepo, requireRepo, main } from './cli.ts';
+import { refuseNonUtf8 } from './encoding.ts';
+import { createSigner, keyCreationTime, buildSignedTagObject, signableTagMessage, PIN_OTHER_SIGNERS } from './signer.ts';
 import { createBackupBundle } from './bundle.ts';
 import * as verify from './verify.ts';
 import {
@@ -16,7 +16,7 @@ import {
   epochForZonedWallClock, latestAllowedMinuteAtOrBefore, nextAllowedMinuteAfter, signTimeFor,
 } from './policy.ts';
 import type { Policy } from './policy.ts';
-import { extractSignature, signatureCreationTime, signatureStatus, verifiedKeyFingerprint, keyMatches, signatureBlockCount, tagSignatureBoundary } from './siginfo.ts';
+import { extractSignature, signatureCreationTime, signatureStatus, verifiedKeyFingerprint, keyMatches, signatureBlockCount, tagSignatureBoundary, tagMessageFromRaw } from './siginfo.ts';
 
 type Env = NodeJS.ProcessEnv;
 type Flags = Record<string, string | boolean>;
@@ -33,10 +33,6 @@ interface AnnotatedRef {
   commit: string;
 }
 
-function requireRepo(repo: string): void {
-  if (!git.isRepo(repo)) throw new Refusal('not a git repository (' + repo + ')');
-}
-
 /** Resolves a user-supplied revision/range (`check`'s and `resign-commits`'
  * `<range>`) via `git rev-list`, converting git's own non-zero exit for an
  * unresolvable range (e.g. a root commit's `~1`) into a refusal naming it --
@@ -46,11 +42,26 @@ function requireRepo(repo: string): void {
  * `label` is what the refusal names on failure -- the user-facing range
  * text, which is not always `args`' own last element (`resign-commits`
  * resolves via `--branches --tags ^<lower>`, not a plain `<range>` arg). */
-function resolveRevList(repo: string, env: Env, args: string[], label: string): string[] {
-  const r = git.run(repo, ['rev-list'].concat(args), { env });
+function resolveRevList(repo: string, env: Env, opts: string[], revs: string[], label: string): string[] {
+  /* `--end-of-options`: whatever `revs` holds is never read as an option
+   * (D20, AC-75); refuseOptionLikeRange() has already refused a leading
+   * `-` in what the caller typed. */
+  const r = git.run(repo, ['rev-list'].concat(opts, ['--end-of-options'], revs), { env });
   if (r.status !== 0) throw new Refusal('invalid revision range \'' + label + '\'');
   const out = (r.stdout as string).replace(/\n$/, '');
   return out ? out.split('\n') : [];
+}
+
+/** A revision range the caller gives (`check`'s, `resign-commits'`) must
+ * not start with `-`, nor may either end of an `a..b`/`a...b`: git would
+ * read it as an option. `check --range=--output=<file>` made rev-list
+ * WRITE <file> (D20, AC-75). A usage error, checked before the repo is
+ * read; `--end-of-options` on every git call that takes a revision is the
+ * second line of defence. */
+function refuseOptionLikeRange(range: string): void {
+  if (range.split(/\.{2,3}/).some((side) => side.startsWith('-'))) {
+    throw new UsageError('<range> \'' + range + '\': a revision must not start with \'-\'');
+  }
 }
 
 function splitIdent(s: string): { name: string; email: string } {
@@ -80,7 +91,12 @@ function writeTmpMsg(msg: string): TmpMsg {
 function policyContext(repo: string, flags: Flags): { policy: Policy; gpgProgram: string; env: Env } {
   const policy = loadPolicy(repo, flags.policy as string | undefined, process.env);
   const gpgProgram = policy.gpgProgram || 'gpg';
-  return { policy, gpgProgram, env: withGitConfig(process.env, 'gpg.program', gpgProgram) };
+  /* Plus gpg.format=openpgp and blank SSH/X.509 programs (D20, AC-76): git
+   * verifies by the signature's armor, so an SSH-signed commit in a
+   * foreign repo made `check` run that repo's gpg.ssh.program. */
+  let env = withGitConfig(process.env, 'gpg.program', gpgProgram);
+  for (const [k, v] of PIN_OTHER_SIGNERS) env = withGitConfig(env, k, v);
+  return { policy, gpgProgram, env };
 }
 
 /** `env` plus one more `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` pair,
@@ -262,6 +278,7 @@ function cmdTag(bin: string, args: string[]): void {
   if (!repo) throw new UsageError('missing <repo>');
   if (!tagName) throw new UsageError('missing <tag>');
   if (positional.length > 2) throw new UsageError('unexpected argument: ' + positional[2]);
+  if (!git.isValidTagName(tagName)) throw new UsageError('<tag>: ' + JSON.stringify(tagName) + ' is not a valid tag name');
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
   const message = resolveMessage(flags);
@@ -311,11 +328,11 @@ function cmdTag(bin: string, args: string[]): void {
 
 function annotatedTags(repo: string, env: Env): AnnotatedRef[] {
   const out = git.text(repo,
-    ['for-each-ref', '--format=%(refname:short)\t%(objecttype)\t%(objectname)\t%(*objectname)', 'refs/tags'], { env });
+    ['for-each-ref', '--format=%(refname)\t%(objecttype)\t%(objectname)\t%(*objectname)', 'refs/tags'], { env });
   if (!out) return [];
   return out.split('\n').map((l): AnnotatedRef => {
-    const [name, type, obj, deref] = l.split('\t');
-    return { name, type, obj, commit: type === 'tag' ? deref : obj };
+    const [ref, type, obj, deref] = l.split('\t');
+    return { name: git.refBase(ref, 'refs/tags/'), type, obj, commit: type === 'tag' ? deref : obj };
   });
 }
 
@@ -331,40 +348,6 @@ function stripSignature(raw: Buffer): Buffer {
    * for any multi-byte character in the tag's own message. */
   const { index } = tagSignatureBoundary(raw.toString('latin1'));
   return index === -1 ? raw : raw.subarray(0, index);
-}
-
-/** A tag's own message -- the raw object's bytes after the header's
- * blank-line separator, with any trailing signature block stripped --
- * NEVER `for-each-ref --format=%(contents)`, which for an ALREADY-SIGNED
- * tag includes the existing signature block as part of its own output
- * (git's own documented behavior, not a bug in git). Feeding that
- * straight back in as a NEW tag's message via `-F` embedded the OLD
- * signature as literal text inside the new message, which then received
- * a second, genuinely new signature appended right after it: a tag
- * object with two concatenated signature blocks (CRITICAL, found
- * resigning an already-signed tag -- D14 follow-up).
- *
- * Truncating at `tagSignatureBoundary`'s own boundary -- the backward
- * walk from EOF, never a bare "last marker anywhere" scan -- is what
- * makes this correct for a message that quotes an old signature block as
- * literal text (e.g. pasting a security advisory into a release tag's
- * own message) AND has further real text after the quote: the walk sees
- * nothing recognizable at EOF and reports no boundary at all, so none of
- * the message is lost. A bare `lastIndexOf` has no notion of "at EOF" and
- * happily returned the quote's own position as a false boundary,
- * silently dropping everything after it on every resign (HIGH,
- * Lead-found, D16 follow-up) -- and separately, the previous FIRST-marker
- * rule this itself had already replaced once cut the message short right
- * at the quote too, for the same underlying reason: neither of two
- * independent algorithms agreed with the one, true backward walk. The
- * REAL, currently-valid signature is always the end of that walk's
- * trailing stack, since `buildSignedTagObject`/`git tag -s` always
- * appends it last. */
-function tagMessageFromRaw(raw: string): string {
-  const idx = raw.indexOf('\n\n');
-  const rest = idx === -1 ? '' : raw.slice(idx + 2);
-  const { index: sigIdx } = tagSignatureBoundary(rest);
-  return sigIdx === -1 ? rest : rest.slice(0, sigIdx);
 }
 
 /** The SAME question `tagMessageFromRaw` answers -- the message minus its
@@ -399,48 +382,17 @@ function independentOldTagMessage(message: string, oldSigCount: number): string 
   return m ? message.slice(0, m.index) : message;
 }
 
-/** Signs `text` (a tag's own bytes, everything before the signature)
- * detached+armored, via the SAME gpg invocation `git tag -s` uses
- * internally (`-bsau <key>`) -- but through `signer.gpgProgram` directly
- * (the `--faked-system-time` wrapper `createSigner` already built), not
- * through any `git` command at all, so nothing here ever creates or
- * moves a ref. Refuses, naming gpg's own first stderr line, on failure. */
-function signTagTextDetached(signer: Signer, env: Env, text: string): string {
-  const r = spawnSync(signer.gpgProgram, ['--batch', '--status-fd=2', '-bsau', signer.signingKey], {
-    env, input: text, encoding: 'utf8',
-  });
-  if (r.status !== 0) {
-    throw new Refusal('failed to sign tag object: ' + (r.stderr || '').trim().split('\n').pop());
-  }
-  return r.stdout;
-}
-
-/** Builds a brand new, fully signed tag object and writes it as a loose
- * object -- WITHOUT ever creating or moving any ref, unlike `git tag
- * -s`, which always does both in one step. (An earlier version of this
- * fix let `git tag -s`/`-f` create the object under its real name, which
- * incidentally moves the real ref too, then immediately reverted that
- * ref -- not actually atomic: a crash between the two steps leaves that
- * one ref moved, reviewer/Lead-found.) The tag's own text (object/type/
- * tag/tagger/blank line/message) is constructed directly from already-
- * parsed fields -- never from `git tag -s`'s own machinery, and never
- * from a previous signature's bytes (item 0: this is also what keeps a
- * resigned tag at exactly 1 signature block, the message here can never
- * contain stray signature material to begin with). Signed via
- * `signTagTextDetached` above, then written via `git hash-object -t tag
- * -w --stdin`, which -- like `commit-tree` for commits -- never touches
- * any ref either. Returns the new object's sha. */
-function buildSignedTagObject(repo: string, env: Env, signer: Signer,
-  args: { object: string; type: string; name: string; taggerLine: string; message: string }): string {
-  const text = 'object ' + args.object + '\ntype ' + args.type + '\ntag ' + args.name +
-    '\ntagger ' + args.taggerLine + '\n\n' + args.message;
-  const sig = signTagTextDetached(signer, env, text);
-  const full = text + sig;
-  const r = git.run(repo, ['hash-object', '-t', 'tag', '-w', '--stdin'], { env, input: full });
-  if (r.status !== 0) {
-    throw new Refusal('resign: failed to write tag object for ' + args.name + ': ' + (r.stderr as string).trim().split('\n')[0]);
-  }
-  return (r.stdout as string).trim();
+/** The D18 refusal on its own, for the checks that must run before the
+ * backup bundle (§ 0, D20, AC-77): a tag whose text ends in a complete
+ * signature-shaped block gpg can neither verify nor attribute to any key.
+ * `label` is how the caller names the tag in its refusal. */
+function refuseAmbiguousTag(repo: string, env: Env, policy: Policy, t: AnnotatedRef, label: string): void {
+  const raw = git.buffer(repo, ['cat-file', '-p', t.obj], { env }).toString('utf8');
+  if (signatureBlockCount(raw, 'tag') !== 1) return;
+  if (signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, true, policy.signingKey).state !== 'bad') return;
+  throw new Refusal(label + ' ends with a signature-shaped block gpg cannot verify or ' +
+    'attribute to any key -- indistinguishable from an unsigned tag whose message merely ends with a ' +
+    'quoted block; refusing to guess, resolve manually');
 }
 
 function cmdResignTags(bin: string, args: string[]): void {
@@ -465,10 +417,12 @@ function cmdResignTags(bin: string, args: string[]): void {
   } else {
     for (const t of all) {
       if (t.type !== 'tag') { skippedLightweight.push(t.name); continue; }
-      const fp = verifiedKeyFingerprint(repo, env, 'tag', t.name);
+      const fp = verifiedKeyFingerprint(repo, env, 'tag', 'refs/tags/' + t.name);
       if (!keyMatches(policy.signingKey, fp)) candidates.push(t);
     }
   }
+  /* Each candidate is re-signed with its message: UTF-8 only (D21, AC-95). */
+  refuseNonUtf8(repo, env, candidates.map((t) => ({ sha: t.obj, label: 'tag ' + t.name })));
 
   const lines: string[] = [];
   for (const n of skippedLightweight) lines.push('resign-tags: ' + n + ' is lightweight, skipped');
@@ -482,8 +436,8 @@ function cmdResignTags(bin: string, args: string[]): void {
   if (!flags.apply) {
     for (const t of candidates) {
       lines.push('resign-tags: ' + t.name + ' would be re-signed');
-      const hasSig = extractSignature(repo, env, 'tag', t.name) !== null;
-      const status = signatureStatus(repo, env, 'tag', t.name, hasSig, policy.signingKey);
+      const hasSig = extractSignature(repo, env, 'tag', 'refs/tags/' + t.name) !== null;
+      const status = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, hasSig, policy.signingKey);
       const key = unverifiableKeyLabel(status);
       if (key) lines.push('resign-tags: ' + t.name + ' would replace unverifiable signature (key ' + key + ')');
     }
@@ -492,6 +446,11 @@ function cmdResignTags(bin: string, args: string[]): void {
     return;
   }
 
+  /* Every refusal before the backup bundle (§ 0, D20, AC-77): the policy
+   * key gpg must be able to read, and D18's ambiguous tag. The loop below
+   * keeps its own checks; they can no longer fire. */
+  keyCreationTime(gpgProgram, policy.signingKey, env);
+  for (const t of candidates) refuseAmbiguousTag(repo, env, policy, t, t.name);
   createBackupBundle(repo, env);
   const results: { name: string; oldSha: string; newSha: string; independentOldMsg: string }[] = [];
   {
@@ -524,7 +483,7 @@ function cmdResignTags(bin: string, args: string[]): void {
       const msg = tagMessageFromRaw(raw);
       const oldSigCount = signatureBlockCount(raw, 'tag');
       const hasSig = oldSigCount === 1;
-      const oldStatus = signatureStatus(repo, env, 'tag', t.name, hasSig, policy.signingKey);
+      const oldStatus = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, hasSig, policy.signingKey);
       /* A tag whose text ends with a complete, well-formed signature
        * block but which gpg can neither verify NOR attribute to any key
        * at all (`bad` -- not `unknown-key`, which at least names a real
@@ -576,7 +535,13 @@ function cmdResignTags(bin: string, args: string[]): void {
       const oldBody = stripSignature(git.buffer(repo, ['cat-file', '-p', r.oldSha], { env }));
       const newRawBuf = git.buffer(repo, ['cat-file', '-p', r.newSha], { env });
       const newBody = stripSignature(newRawBuf);
-      const bodyOk = oldBody.equals(newBody);
+      /* The old body with the one change `buildSignedTagObject` makes: a
+       * newline after a message that lacked one (D20, R2, AC-79). latin1
+       * keeps every byte. */
+      const oldText = oldBody.toString('latin1');
+      const sep = oldText.indexOf('\n\n');
+      const expectedBody = sep === -1 ? oldText : oldText.slice(0, sep + 2) + signableTagMessage(oldText.slice(sep + 2));
+      const bodyOk = expectedBody === newBody.toString('latin1');
       const newRaw = newRawBuf.toString('utf8');
       /* Exactly 1 signature block, never 0 or 2+ -- the defensive guard
        * that would have caught the %(contents) bug above on its own:
@@ -605,7 +570,7 @@ function cmdResignTags(bin: string, args: string[]): void {
        * sentences gone) without false-failing on that harmless wrinkle. */
       const messageIndependentOk =
         tagMessageFromRaw(newRaw).replace(/\n*$/, '') === r.independentOldMsg.replace(/\n*$/, '');
-      const verifyOk = git.run(repo, ['tag', '-v', r.name], { env }).status === 0;
+      const verifyOk = git.run(repo, ['verify-tag', 'refs/tags/' + r.name], { env }).status === 0;
       const ok = sameTarget && bodyOk && sigBlocksOk && messageIndependentOk && verifyOk;
       if (!ok) allOk = false;
       lines.push('verify: ' + r.name + ': ' + (ok ? 'OK' :
@@ -760,7 +725,7 @@ function checkOneTag(repo: string, env: Env, t: AnnotatedRef, policy: Policy, gp
     out.push(t.name + ' signature multiple-signatures (' + sigBlocks + ' signature blocks found)');
   } else {
     const sig = extractSignature(repo, env, 'tag', t.obj);
-    const status = signatureStatus(repo, env, 'tag', t.name, sig !== null, policy.signingKey);
+    const status = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, sig !== null, policy.signingKey);
     if (status.state !== 'ok') {
       out.push(t.name + ' signature ' + signatureDetail(status));
     } else if (sig) {
@@ -789,6 +754,8 @@ function cmdCheck(bin: string, args: string[]): void {
   if (positionalRange !== undefined && flags.range !== undefined) {
     throw new UsageError('give the revision range either positionally or as --range, not both');
   }
+  const givenRange = positionalRange !== undefined ? positionalRange : (flags.range as string | undefined);
+  if (givenRange !== undefined) refuseOptionLikeRange(givenRange);
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
 
@@ -799,7 +766,7 @@ function cmdCheck(bin: string, args: string[]): void {
     range = '@{upstream}..HEAD';
   }
 
-  const commits = resolveRevList(repo, env, ['--reverse', range], range);
+  const commits = resolveRevList(repo, env, ['--reverse'], [range], range);
 
   const lines: string[] = [];
   for (const c of commits) lines.push(...checkOneCommit(repo, env, c, policy, gpgProgram));
@@ -993,6 +960,7 @@ function cmdResignCommits(bin: string, args: string[]): void {
   if (dotdot !== -1 && fromRoot) {
     throw new UsageError('--from-root takes a bare <rev>, not a range (\'' + range + '\')');
   }
+  refuseOptionLikeRange(range);
 
   requireRepo(repo);
   const { policy, gpgProgram, env } = policyContext(repo, flags);
@@ -1001,11 +969,11 @@ function cmdResignCommits(bin: string, args: string[]): void {
 
   let lowerSha: string | null = null;
   if (lower) {
-    const lowerR = git.run(repo, ['rev-parse', '--verify', '--quiet', lower + '^{commit}'], { env });
+    const lowerR = git.run(repo, ['rev-parse', '--verify', '--quiet', '--end-of-options', lower + '^{commit}'], { env });
     if (lowerR.status !== 0) throw new Refusal('invalid revision range \'' + range + '\'');
     lowerSha = (lowerR.stdout as string).replace(/\n$/, '');
   }
-  const upperR = git.run(repo, ['rev-parse', '--verify', '--quiet', upper + '^{commit}'], { env });
+  const upperR = git.run(repo, ['rev-parse', '--verify', '--quiet', '--end-of-options', upper + '^{commit}'], { env });
   if (upperR.status !== 0) throw new Refusal('invalid revision range \'' + range + '\'');
   const upperSha = (upperR.stdout as string).replace(/\n$/, '');
   if (lowerSha) {
@@ -1033,10 +1001,9 @@ function cmdResignCommits(bin: string, args: string[]): void {
    * parents has already been marked -- true transitive descendance from
    * R0, not mere non-ancestry of <lower>. An affected ref is then only
    * one whose tip actually ended up marked. */
-  const inRange = new Set(resolveRevList(repo, env, [range], range));
-  const candidateArgs = ['--topo-order', '--reverse', '--parents', '--branches', '--tags'];
-  if (lowerSha) candidateArgs.push('^' + lowerSha);
-  const candidateLines = resolveRevList(repo, env, candidateArgs, range);
+  const inRange = new Set(resolveRevList(repo, env, [], [range], range));
+  const candidateLines = resolveRevList(repo, env, ['--topo-order', '--reverse', '--parents', '--branches', '--tags'],
+    lowerSha ? ['^' + lowerSha] : [], range);
   const rewriteSet = new Set<string>();
   const toRewrite: string[] = [];
   for (const line of candidateLines) {
@@ -1056,13 +1023,18 @@ function cmdResignCommits(bin: string, args: string[]): void {
         ' author/committer is not the policy identity -- identities are never changed here');
     }
   }
-  const branchesRaw = git.text(repo, ['for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads'], { env });
+  const branchesRaw = git.text(repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'], { env });
   const branches = branchesRaw ? branchesRaw.split('\n').map((l) => {
     const sp = l.indexOf(' ');
-    return { name: l.slice(0, sp), sha: l.slice(sp + 1) };
+    return { name: git.refBase(l.slice(0, sp), 'refs/heads/'), sha: l.slice(sp + 1) };
   }) : [];
   const affectedBranches = branches.filter((b) => rewriteSet.has(b.sha));
   const affectedTags = annotatedTags(repo, env).filter((t) => rewriteSet.has(t.commit));
+  /* Every commit re-signed and every tag re-created on them: UTF-8 only (D21, AC-95). */
+  refuseNonUtf8(repo, env, [
+    ...toRewrite.map((c) => ({ sha: c, label: 'commit ' + c.slice(0, 7) })),
+    ...affectedTags.filter((t) => t.type === 'tag').map((t) => ({ sha: t.obj, label: 'tag ' + t.name })),
+  ]);
 
   if (!flags.apply) {
     if (fromRoot) process.stdout.write('resign-commits: root-inclusive: ' + toRewrite.length + ' commits\n');
@@ -1077,8 +1049,8 @@ function cmdResignCommits(bin: string, args: string[]): void {
     for (const t of affectedTags) {
       process.stdout.write('resign-commits: tag ' + t.name + (t.type === 'tag' ? ' would be re-signed and moved' : ' would be moved') + '\n');
       if (t.type === 'tag') {
-        const hasSig = extractSignature(repo, env, 'tag', t.name) !== null;
-        const status = signatureStatus(repo, env, 'tag', t.name, hasSig, policy.signingKey);
+        const hasSig = extractSignature(repo, env, 'tag', 'refs/tags/' + t.name) !== null;
+        const status = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, hasSig, policy.signingKey);
         const key = unverifiableKeyLabel(status);
         if (key) process.stdout.write('resign-commits: tag ' + t.name + ' would replace unverifiable signature (key ' + key + ')\n');
       }
@@ -1091,6 +1063,42 @@ function cmdResignCommits(bin: string, args: string[]): void {
     return;
   }
 
+  /* Every refusal before the backup bundle (§ 0, D20, AC-77): the policy
+   * key gpg must be able to read, and for every annotated tag that moves,
+   * a well-formed object pointing at a commit or at another tag that is
+   * itself re-created here (else no order exists), and D18's ambiguous
+   * tag. The loops below keep their own checks; they can no longer fire. */
+  keyCreationTime(gpgProgram, policy.signingKey, env);
+  {
+    const targets = new Map<string, { type: string; obj: string }>();
+    for (const t of affectedTags) {
+      if (t.type !== 'tag') continue;
+      const raw = git.buffer(repo, ['cat-file', '-p', t.obj], { env }).toString('utf8');
+      const om = /^object ([0-9a-f]{40})$/m.exec(raw);
+      const tym = /^type (\S+)$/m.exec(raw);
+      if (!om || !tym) throw new Refusal('tag ' + t.name + ': malformed tag object');
+      if (tym[1] !== 'commit' && tym[1] !== 'tag') {
+        throw new Refusal('tag ' + t.name + ' points at a ' + tym[1] + ', not a commit or tag -- not supported');
+      }
+      refuseAmbiguousTag(repo, env, policy, t, 'tag ' + t.name);
+      targets.set(t.name, { type: tym[1], obj: om[1] });
+    }
+    /* The recreation order below, by name only: a tag of a tag waits for its inner tag's re-creation. */
+    const done = new Set<string>();
+    const pending = new Set(targets.keys());
+    let progressed = true;
+    while (pending.size > 0 && progressed) {
+      progressed = false;
+      for (const t of affectedTags) {
+        const target = targets.get(t.name);
+        if (!target || !pending.has(t.name) || (target.type === 'tag' && !done.has(target.obj))) continue;
+        done.add(t.obj);
+        pending.delete(t.name);
+        progressed = true;
+      }
+    }
+    if (pending.size > 0) throw new Refusal('could not resolve tag dependency order for: ' + Array.from(pending).join(', '));
+  }
   createBackupBundle(repo, env);
   const signers: { cleanup(): void }[] = [];
   const tmpFiles: TmpMsg[] = [];
@@ -1197,7 +1205,7 @@ function cmdResignCommits(bin: string, args: string[]): void {
         const taggerEpoch = parseInt(tm[2], 10);
         const msg = tagMessageFromRaw(raw);
         const hasSig = signatureBlockCount(raw, 'tag') === 1;
-        const oldStatus = signatureStatus(repo, env, 'tag', t.name, hasSig, policy.signingKey);
+        const oldStatus = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, hasSig, policy.signingKey);
         /* Same refusal as `cmdResignTags` (D16/D18 follow-up, Lead-found):
          * a tag ending in a complete, well-formed signature block gpg
          * can neither verify nor attribute to any key is indistinguishable

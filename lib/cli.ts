@@ -2,6 +2,7 @@
  * small flag parser used by all four bin entry points. */
 import path from 'node:path';
 import fs from 'node:fs';
+import * as git from './git.ts';
 
 export class UsageError extends Error {}
 export class Refusal extends Error {}
@@ -60,6 +61,19 @@ export function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
   return { positional, flags };
 }
 
+/** § 0: <repo> must be a git repository, and its top level -- never a
+ * subdirectory of a work tree, whose history every tool would otherwise
+ * read and rewrite relative to that subdirectory (AC-70). Symlinks and a
+ * trailing slash are resolved before comparing. */
+export function requireRepo(repo: string): void {
+  if (!git.isRepo(repo)) throw new Refusal('not a git repository (' + repo + ')');
+  const top = git.topLevel(repo);
+  if (top === null || fs.realpathSync(top) !== fs.realpathSync(repo)) {
+    throw new Refusal('not the top level of its repository (' + repo + '; the top level is ' +
+      (top === null ? 'unknown' : fs.realpathSync(top)) + ')');
+  }
+}
+
 /** Resolves a --rules/--terms/--allow style path, applying the shared rules:
  * must exist (usage error otherwise), must not resolve inside <repo>
  * (refusal otherwise). flagName is e.g. '--rules'. Two separate containment
@@ -99,6 +113,12 @@ export function resolveOutsideFile(repo: string, flagName: string, filePath: str
  * basename -- those differ since every tool's logic lives in lib/<tool>.ts
  * but is invoked via bin/<tool>. */
 export function main(bin: string, fn: (bin: string) => void): void {
+  const identity = git.callerIdentityConfig(process.env);
+  for (const k of git.callerGitEnvNames(process.env)) delete process.env[k];
+  /* The caller's identity alone comes back; git-sign appends its pins after it (D21, AC-81). */
+  Object.assign(process.env, git.configCountEnv(identity));
+  /* Also for what runs under us (gpg, a --hook): the objects push sends (D21, AC-96). */
+  process.env.GIT_NO_REPLACE_OBJECTS = '1';
   try {
     fn(bin);
   } catch (e) {

@@ -3,6 +3,123 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.4
+
+- Change: `git-leak-scan` finds more secret shapes. These include
+  `API_KEY=…` and `GITHUB_TOKEN=…`, `password: …` and JSON
+  `"password": "…"`, spaces around `=`, base64 values, PGP private key
+  blocks, AWS key ids, GitHub, Slack and JWT tokens, and `Bearer` tokens.
+  An existing repository can get new hits, and an old hit can now be
+  longer. Add the ones that are fine to your `--allow` file.
+- Change: `git-leak-scan`'s `local-path` also finds `/root/…`,
+  `c:\users\…` in any case, and `~<name>/…`. A bare `~/…` stays
+  quiet.
+- Docs: the README says gpg is needed for every writing tool, not only
+  for signed histories. The bundle restore recipe (spec § 4.1) is now
+  tested.
+- Faster: `git-leak-scan` reads and scans each distinct blob once,
+  however many commits it appears in, and no longer holds every blob in
+  memory. The report is unchanged. On nanojira v4.1.2's history (31
+  commits) a scan took 59568 ms instead of 444559 ms, with byte-identical
+  output.
+- Fix: `git-leak-scan` no longer takes hours on a long line of hex,
+  base64 or dotted text; such a line costs time in proportion to its
+  length. Many hits in one file are cheap as well: 40000 took 12 s
+  before.
+- Change: `git-leak-scan` also finds camelCase names (`authToken`,
+  `dbPassword`, `awsSecretAccessKey`), `apikey` written flat, and GitHub
+  `github_pat_`, Stripe `sk_live_`/`rk_live_`, Google `AIza` and GitLab
+  `glpat-` tokens. Existing repositories may get new hits; `--allow`
+  absorbs them.
+- Fix: a refusal no longer leaves a backup bundle behind. A missing or
+  unreadable signing key, `add-file` onto a directory, and `resign-*`'s
+  key and tag checks now run before the bundle is created. `apply
+  --map` into a missing directory, or onto a directory, is a usage error
+  instead of a crash after the bundle.
+- Fix (D17): a repository's `gpg.format=ssh` with its own
+  `gpg.ssh.program` or `gpg.x509.program` can no longer run code through
+  git-sign, not even through the read-only `check`. Every pinned
+  `gpg.program` now comes with `gpg.format=openpgp` and empty SSH and
+  X.509 programs; this covers the signing calls of all tools.
+- Fix: `git-sign check` and `resign-commits` never read a revision
+  range as a git option. `check --range=--output=<file>` used to create
+  `<file>`. A range (or a side of it) starting with `-` is now a usage
+  error.
+- Fix: `git-release-squash apply`/`tail` and `git-history-rewrite` build
+  every new object first and then move every branch and tag in one
+  transaction. Each ref must still hold the value read when the run
+  started, and a new tag must not exist yet. A failure partway through
+  used to leave some refs moved and others not; `tail --tag` moved the
+  branch before it created the tag. A `tail --tag` message that is empty
+  is now a usage error. `git-history-rewrite` also refuses if any branch
+  or tag was created, moved or deleted while it worked, including while
+  it signed the tags; a branch or tag created in the last moment before
+  the transaction is named, with exit 1.
+- Fix: `git-release-squash tail --tag=<tag>` and `git-sign tag` check
+  the tag name first; an invalid one is a usage error. `tail
+  --tag='bad name' --apply` used to move the branch, create no tag and
+  crash.
+- Fix: a branch and a tag may share a name. `git-history-rewrite` and
+  `git-release-squash apply` used to create stray `refs/heads/heads/<x>`
+  and `refs/tags/tags/<x>` refs and leave the real ones on the old
+  history; `tail` and `apply` crashed. All four tools now use full
+  refnames.
+- Fix: `git-history-rewrite` re-creates every annotated tag with its
+  message byte for byte and exactly one signature. A signed tag used to
+  get its old signature embedded in the message, and so two signature
+  blocks, while verify said OK; `#` lines and trailing spaces in a tag
+  message were dropped. The one exception: a message without a trailing
+  newline gets one. Without it the signature was unreadable, in
+  `git-sign resign-tags` and `resign-commits` too.
+- Fix: `<repo>` alone names the repository. A caller's `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_CONFIG_PARAMETERS` and the other variables git
+  reads before `-C` are removed first. `GIT_DIR=B/.git
+  git-history-rewrite replace A --apply` used to rewrite B. The caller's
+  `user.name`, `user.email` and `user.signingkey` as `GIT_CONFIG_COUNT`
+  entries still pass, so a release script can supply the signing
+  identity that way; every other key is dropped.
+- Fix: a commit or tag that is not UTF-8 (bytes like `\351`, or an
+  `encoding` header such as ISO-8859-1) is refused before anything is
+  written, exit 2. `git-history-rewrite` used to turn such bytes into
+  U+FFFD, re-sign the result and report success; `git-sign resign-tags`
+  moved the ref before it reported verify FAILED.
+- Fix: replace refs (`git replace`) no longer hide anything. Every tool
+  works on the objects a push sends; `git-leak-scan` used to miss a
+  secret commit hidden behind a replacement.
+- Fix: a NUL byte in `git-release-squash tail --tag`'s message is a
+  usage error up front. It used to crash after writing the backup
+  bundle.
+- Fix (security): a signing key that starts with `-` is refused before
+  gpg runs, exit 2. A repository's or caller's `user.signingkey` of
+  `--options=<file>` made `git-history-rewrite` and
+  `git-release-squash` hand that file to gpg, which could run a program
+  named in it. git-sign was not affected.
+- Change: no tool runs the repository's own hooks or fsmonitor any
+  more. `git-sign commit` used to run `pre-commit`, `commit-msg` and
+  `post-commit`, and every writing tool ran a `reference-transaction`
+  hook. If you rely on such a hook (Git LFS, for example), run it
+  yourself afterwards.
+- Fix: `git-release-squash tail`/`apply --apply` work on a bare
+  repository. They used to crash in the dirty check.
+- Change: the backup bundle is named after the real top level and goes
+  next to it, also when `<repo>` is a symlink. A link `r/self -> .`
+  used to put the bundle inside the work tree.
+- Fix: `git-release-squash apply --map` writes the map only after every
+  ref has moved; a failed run leaves no map file.
+- Fix: a tool run with no subcommand says so and lists its
+  subcommands, instead of "unknown subcommand 'undefined'".
+- Fix: a tag whose name starts with `-` no longer crashes
+  `git-release-squash apply`, and no longer fails `git-sign
+  resign-tags`' verify.
+- Fix: a subdirectory of a work tree given as `<repo>` is now refused,
+  naming the top level, by every tool. `git-history-rewrite replace
+  <repo>/sub --apply` used to rewrite the whole history down to that
+  subdirectory (every file outside it gone), report OK, and leave its
+  backup bundle inside the work tree.
+- Test suite: a tool that hangs or floods its output is a FAIL, no
+  longer counted as "cannot run", and any "cannot run" now makes
+  `npm test` exit 1 (AC-69).
+
 ## 0.4.3
 
 No change to the four tools: `git-release-squash`, `git-leak-scan`,

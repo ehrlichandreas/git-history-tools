@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-/* Builds the three dist/*.mjs bundles that package.json's "bin" field points
- * at directly (D7): dist/squash.mjs, dist/scan.mjs and dist/rewrite.mjs,
- * each the corresponding lib/*.ts entry plus everything it imports from
- * lib/, bundled by esbuild into one self-contained ESM file. esbuild is a
- * devDependency, required only here -- the lib/*.ts sources it reads still
- * have zero runtime dependencies.
+/* Builds the four dist/*.mjs bundles that package.json's "bin" field points
+ * at directly (D7): dist/squash.mjs, dist/scan.mjs, dist/rewrite.mjs and
+ * dist/sign.mjs, each the corresponding lib/*.ts entry plus everything it
+ * imports from lib/, bundled by esbuild into one self-contained ESM file.
+ * esbuild is a devDependency, required only here -- the lib/*.ts sources
+ * it reads still have zero runtime dependencies.
  *
  * Node refuses to type-strip a .ts file whose resolved path contains the
  * literal string "node_modules" (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING),

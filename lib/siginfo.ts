@@ -73,6 +73,41 @@ export function tagSignatureBoundary(raw: string): { index: number; count: numbe
   return { index, count };
 }
 
+/** A tag's own message -- the raw object's bytes after the header's
+ * blank-line separator, with any trailing signature block stripped --
+ * NEVER `for-each-ref --format=%(contents)`, which for an ALREADY-SIGNED
+ * tag includes the existing signature block as part of its own output
+ * (git's own documented behavior, not a bug in git). Feeding that
+ * straight back in as a NEW tag's message via `-F` embedded the OLD
+ * signature as literal text inside the new message, which then received
+ * a second, genuinely new signature appended right after it: a tag
+ * object with two concatenated signature blocks (CRITICAL, found
+ * resigning an already-signed tag -- D14 follow-up). git-history-rewrite
+ * had the same bug and uses this too (D20, AC-71).
+ *
+ * Truncating at `tagSignatureBoundary`'s own boundary -- the backward
+ * walk from EOF, never a bare "last marker anywhere" scan -- is what
+ * makes this correct for a message that quotes an old signature block as
+ * literal text (e.g. pasting a security advisory into a release tag's
+ * own message) AND has further real text after the quote: the walk sees
+ * nothing recognizable at EOF and reports no boundary at all, so none of
+ * the message is lost. A bare `lastIndexOf` has no notion of "at EOF" and
+ * happily returned the quote's own position as a false boundary,
+ * silently dropping everything after it on every resign (HIGH,
+ * Lead-found, D16 follow-up) -- and separately, the previous FIRST-marker
+ * rule this itself had already replaced once cut the message short right
+ * at the quote too, for the same underlying reason: neither of two
+ * independent algorithms agreed with the one, true backward walk. The
+ * REAL, currently-valid signature is always the end of that walk's
+ * trailing stack, since `buildSignedTagObject`/`git tag -s` always
+ * appends it last. */
+export function tagMessageFromRaw(raw: string): string {
+  const idx = raw.indexOf('\n\n');
+  const rest = idx === -1 ? '' : raw.slice(idx + 2);
+  const { index: sigIdx } = tagSignatureBoundary(rest);
+  return sigIdx === -1 ? rest : rest.slice(0, sigIdx);
+}
+
 /** How many distinct signature blocks `rev`'s raw object text actually
  * contains: for a tag, `tagSignatureBoundary(raw).count` above (NOT every
  * `BEGIN` marker anywhere in the text -- see its own comment for why); for a

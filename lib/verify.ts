@@ -44,12 +44,13 @@ export function verifySignatures(repo: string, env: NodeJS.ProcessEnv): VerifyRe
     const r = git.run(repo, ['verify-commit', c], { env });
     if (r.status !== 0) return line('signatures', false, 'verify-commit ' + c.slice(0, 7) + ' failed: ' + (r.stderr as string).trim());
   }
-  const tagsRaw = git.text(repo, ['for-each-ref', '--format=%(refname:short)\t%(objecttype)', 'refs/tags'], { env });
+  const tagsRaw = git.text(repo, ['for-each-ref', '--format=%(refname)\t%(objecttype)', 'refs/tags'], { env });
   const tags = tagsRaw ? tagsRaw.split('\n') : [];
   for (const l of tags) {
-    const [name, type] = l.split('\t');
+    const [ref, type] = l.split('\t');
     if (type !== 'tag') continue;
-    const r = git.run(repo, ['verify-tag', name], { env });
+    const name = git.refBase(ref, 'refs/tags/');
+    const r = git.run(repo, ['verify-tag', ref], { env });
     if (r.status !== 0) return line('signatures', false, 'verify-tag ' + name + ' failed: ' + (r.stderr as string).trim());
   }
   return line('signatures', true);

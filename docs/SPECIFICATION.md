@@ -15,7 +15,10 @@ implementation that disagrees is wrong, not the test.
 - Every tool is invoked as `<bin> <subcommand> [args...]`. An unknown
   subcommand, a missing required argument, or an unknown flag is a **usage
   error**: exit 2, one line on stderr, `<bin-basename>: <reason>` (e.g.
-  `git-release-squash: unknown subcommand 'plna'`), nothing on stdout.
+  `git-release-squash: unknown subcommand 'plna'`), nothing on stdout. No
+  subcommand at all is `<bin>: missing subcommand (usage: <bin>
+  <subcommands> <repo> ...)` (AC-86); git-sign prints its full usage
+  (§ 5).
 - A value flag takes its value as `--flag=<value>` or as the next argument
   (`--flag <value>`); in the space-separated form, a next argument that
   itself starts with `--` is never taken as the value — `--message --apply`
@@ -37,7 +40,43 @@ implementation that disagrees is wrong, not the test.
 - `<repo>` is always a required positional argument: the path to the git
   repository to operate on (never the current directory implicitly). A
   `<repo>` that is not a git repository (no `.git`) is a refusal, not a
-  usage error: `<bin>: not a git repository (<repo>)`.
+  usage error: `<bin>: not a git repository (<repo>)`. `<repo>` must be
+  the repository's top level (`git rev-parse --show-toplevel`, or a bare
+  repository's own git dir; symlinks and a trailing slash are resolved
+  before comparing): a subdirectory of a work tree, or its `.git`, is the
+  refusal `<bin>: not the top level of its repository (<repo>; the top
+  level is <path>)`, `<path>` being the work tree (AC-80), by every
+  subcommand of every tool, before anything else is read (D20, AC-70).
+- `<repo>` alone names the repository (D21, AC-81). Each tool first
+  removes from its own environment every variable git reads before `-C`
+  (`git rev-parse --local-env-vars`: `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`, `GIT_CONFIG_PARAMETERS`, …)
+  and `GIT_CONFIG_COUNT` with its `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`.
+  Nothing is refused for being set, so a tool run from a git hook works.
+  Of the caller's config only the identity comes back: `GIT_CONFIG_COUNT`
+  entries whose key is `user.name`, `user.email` or `user.signingkey`
+  (any case) are put back, every other key is dropped, and
+  `GIT_CONFIG_PARAMETERS` passes nothing. So a release script passes the
+  signing identity as `GIT_CONFIG_COUNT` entries. git-sign's policy
+  identity and key still win over them (D21, AC-81).
+- Every git call a tool makes runs with `-c core.hooksPath=/dev/null -c
+  core.fsmonitor=false`: the repository's own hooks (including
+  `reference-transaction`) and fsmonitor never run (D21, AC-82). Filter
+  drivers and the repository's own `gpg.program` (outside git-sign) still
+  run, by design.
+- Every git call a tool makes runs with `GIT_NO_REPLACE_OBJECTS=1`:
+  `refs/replace/*` never swaps an object, so every tool sees what `git
+  push` sends (D21, AC-96).
+- ght rewrites UTF-8 objects only. A commit or tag a run would rewrite or
+  re-sign whose message, author, committer or tagger has bytes that are
+  not valid UTF-8, or which has an `encoding` header other than UTF-8, is
+  a usage error before anything is written, dry run included: `<bin>:
+  commit <short>|tag <name> is not UTF-8 (<reason>); ght rewrites UTF-8
+  objects only, nothing written` (D21, AC-95).
+- A signing key that starts with `-` (from the repository's or the
+  caller's `user.signingkey`) is a usage error before gpg runs: `<bin>:
+  user.signingkey "<key>" starts with "-", which gpg would read as an
+  option; nothing written` (D21, AC-98).
 - **(decision)** `--name=<name>` is accepted by `git-release-squash plan`,
   `apply` and `tail`; it feeds the `<name>` in the default subject template
   `<name> <tag>: <title>`. When omitted, `<name>` defaults to the
@@ -70,6 +109,9 @@ implementation that disagrees is wrong, not the test.
 - **(decision)** `--dates=anon|keep` is accepted by `git-release-squash apply`
   and `tail` (not by `plan`, which never writes and so never assigns
   dates); default `anon`. An unrecognised value is a usage error.
+- **(D20)** Every tool names a ref by its full refname (`refs/heads/<x>`,
+  `refs/tags/<x>`) when it reads, moves or verifies it, so a branch and a
+  tag may share a name (AC-72). Output still prints the plain `<x>`.
 - A repository with **any merge commit** reachable from HEAD is refused by
   every `git-release-squash` subcommand (`plan`, `apply`, `tail`) and by every
   `git-history-rewrite` subcommand: `<bin>: merge commits are not supported
@@ -135,7 +177,9 @@ already belong to some tag; an untagged tail is what `tail` is for):
 `git-release-squash: HEAD is not tagged -- run 'tail' first`. Refuses on a merge
 commit, and (only when `--apply` is given — the writing form) on a dirty
 working tree: `git-release-squash: working tree is dirty`. A dry run (no
-`--apply`) tolerates a dirty tree, exactly like `plan`.
+`--apply`) tolerates a dirty tree, exactly like `plan`. A bare repository
+has no working tree, so the check is skipped there (`tail` too; D21,
+AC-83).
 
 Without `--apply`: prints the same two-line-per-tag report `plan` prints
 (identical format), then one line `git-release-squash: dry run, no ref changed
@@ -158,7 +202,9 @@ With `--apply`:
    commit that existed before the rewrite, `<old-full-sha> <tag>`, in no
    particular required order, covering every original commit including
    the tag commits themselves (a tag spanning 5 folded commits produces 5
-   map lines, all naming that one tag).
+   map lines, all naming that one tag). Written only once every ref has
+   moved: a failed ref transaction (§ 4.5) leaves no map file (D21,
+   AC-85).
 4. Runs verification (§ 4.2) and prints its report.
 5. Exits 0 if the rewrite and verification both succeeded; exits 1 (after
    the rewrite has already happened — this is not a refusal, the write is
@@ -216,6 +262,11 @@ defeating the anonymisation `--dates=anon` exists for):
   under `keep` it is the real time the tag is created. The signature time
   is pinned the same way as for commits (§ 0 / D1: the signing key's
   creation time + 60s via `--faked-system-time`), regardless of `--dates`.
+- `<tag>` must be a valid new tag name: `git check-ref-format
+  refs/tags/<tag>` accepts it and it does not start with `-`. Otherwise
+  it is a usage error, exit 2, before the repository is even read, dry
+  run or `--apply` alike: `git-release-squash: --tag: "<tag>" is not a
+  valid tag name` (the name JSON-quoted; D20, AC-73).
 - Refuses, before writing anything (dry run or `--apply` alike, same as
   the "HEAD is not tagged"/"already tagged" preconditions elsewhere), if
   `<tag>` already exists: `git-release-squash: tag <tag> already exists`.
@@ -231,18 +282,56 @@ Searches every blob reachable from any ref, every commit message, every
 annotated tag message, and every author/committer/tagger identity line
 (name and email) for:
 
-- **email**: an RFC 5322-shaped local@domain address;
+- **email**: an RFC 5322-shaped local@domain address (a local part of up
+  to 64 characters, a domain of up to 253, RFC 5321's limits);
 - **url**: an `http://` or `https://` URL;
-- **local-path**: an absolute path under `/Users/`, `/home/`, or
-  `C:\Users\`;
+- **local-path**: a path into a home directory, which names its user
+  (D22): under `/Users/`, `/home/`, `C:\Users\` (any case), `/root/`
+  (not inside a longer path or a URL), or `~<name>/`. A bare `~/` names no
+  one and is not a hit;
 - **hostname**: a dotted hostname containing at least one of
-  `.local`, `.internal`, `.corp`, `.lan`;
+  `.local`, `.internal`, `.corp`, `.lan` (labels of 1 to 63 characters,
+  up to 16 before that suffix and 16 after it);
 - **ip**: an IPv4 dotted-quad (not `127.0.0.1` or `0.0.0.0`, which are not
   flagged — **decision**, those two are never a leak);
-- **secret**: a PEM private-key header (`-----BEGIN ... PRIVATE KEY-----`)
-  or a line matching `[A-Za-z0-9_-]{20,}` immediately preceded by one of
-  `token=`, `secret=`, `key=`, `password=` (case-insensitive, no space
-  before `=`).
+- **secret** (D22), any of:
+  - a private-key header, `-----BEGIN ... PRIVATE KEY-----` or
+    `-----BEGIN ... PRIVATE KEY BLOCK-----` (PGP);
+  - `<name><sep><value>`: a name ending in `token`, `secret`, `key`,
+    `password` or `apikey` (case-insensitive), either whole or after up to 8 parts
+    of up to 64 letters or digits, each followed by `_`, `.` or `-`
+    (`API_KEY`, `GITHUB_TOKEN`, `x-api-key`, `db.password`, not
+    `monkey`); `=` or `:`, optionally with spaces and quotes around it
+    (`password: …`, JSON `"password": "…"`); a value of 20 or more
+    characters from `[A-Za-z0-9_+/-]`, dotted parts allowed, with up to
+    two `=` of padding. The compact form (`name=value`, nothing around the
+    `=`) needs nothing more; any other form also needs a digit in the
+    value, so `token = generate_authentication_token()` is not a hit;
+  - the same with a camelCase name: `Token`, `Secret`, `Password`,
+    `ApiKey`, `AccessKey` or `PrivateKey`, case-sensitive, right after a
+    lowercase letter or digit (`authToken`, `dbPassword`,
+    `awsSecretAccessKey`); never a bare `Key` (`sortKey`), same value and
+    digit rules;
+  - a well-known token shape: an AWS access key id (`AKIA`/`ASIA` plus 16
+    of `[0-9A-Z]`), a GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`
+    plus 36 alphanumerics, at least one a digit), a Slack token
+    (`xoxb-`/`xoxp-`, 6 or more digits, `-`, 10 more), a JWT
+    (`eyJ….eyJ….…`, three base64url parts of 10 or more), `Bearer ` plus
+    20 or more token characters with a digit among them, a GitHub
+    fine-grained token (`github_pat_`, 22 alphanumerics, `_`, 59 more), a
+    Stripe live key (`sk_live_`/`rk_live_` plus 24 or more
+    alphanumerics), a Google API key (`AIza` plus 35 of
+    `[0-9A-Za-z_-]`) or a GitLab token (`glpat-` plus 20 of
+    `[0-9A-Za-z_-]`); these last four need two of lowercase, uppercase
+    and digit after the prefix, so a placeholder (`glpat-xxxx…`) is not
+    a hit.
+
+  A `secret` hit inside a longer one (`GITHUB_TOKEN=ghp_…`,
+  `Bearer eyJ…`) is not reported separately; the longer one is.
+
+Every repeat in these patterns that can run along a line is bounded, so a
+long line costs time in proportion to its length: a 1 MB line of hex,
+`a_a_…` or joined UUIDs scans in seconds (D22, AC-92).
 
 The repo's own author identity is reported like any other email;
 allowlist it explicitly if it is meant to be public.
@@ -272,6 +361,9 @@ of the same unmodified file counts 40, not 1 — every reachable blob is
 scanned, including ones identical to an ancestor's). For a hit in a commit
 message, tag message, or identity line (no path), `<path>` is the literal
 string `(message)`, `(tag-message)`, or `(identity)` respectively.
+Counting every pair does not mean reading every pair: a blob's hits
+depend on its content alone, so each distinct blob is read and scanned
+once (D22, AC-89).
 
 `--allow <file>`: one exact `<match>` string per line (blank/`#` lines
 skipped); any hit whose `<match>` equals a line in this file, verbatim, is
@@ -310,7 +402,11 @@ message's text: `git-history-rewrite: commit <short-sha> message would change --
 replace only rewrites file contents` (or `tag <tag>` for a tag message).
 This is checked for every commit/tag up front, before any blob is
 rewritten, so the refusal is exit 1 with the repo fully unchanged, not a
-partial rewrite.
+partial rewrite. A tag's message is its raw object's text after the
+header, minus its trailing signature (git-sign's boundary walk, § 5.3) --
+never `for-each-ref --format=%(contents)`, which includes a signed tag's
+signature, so a rule matching only inside the old signature changes no
+message (D20, AC-71).
 
 `--hook <script>`: after rules are applied to produce a new root tree for
 a commit, `<script>` is run once per **distinct resulting root tree**
@@ -332,10 +428,16 @@ trees — but no ref moves and no bundle is created).
 
 With `--apply`: creates the backup bundle, rewrites every ref (branches
 and tags) to point at the rewritten history; tag names, messages, and
-types are kept; an annotated tag is re-signed, dated at its own (kept, not
+types are kept; an annotated tag is re-signed with its message byte for
+byte (as read above, never cleaned up by `git tag`) and exactly one
+signature. The one exception, here and in git-sign's `resign-tags` and
+`resign-commits`: a non-empty message without a trailing newline (as `git
+tag -a --cleanup=verbatim -m x` stores it) gets one, since a signature
+appended to it would start mid-line, where git never finds it (D20,
+AC-79). The signature is dated at the tag's own (kept, not
 anonymised — § 0 lists dates as untouched by `replace`/`add-file`, only
 `git-release-squash` anonymises) original tagger date. Runs verification
-(§ 4.2) with the replace-specific fourth check (§ 4.5); prints its report;
+(§ 4.2) with the replace-specific fourth check (§ 4.2, item 4); prints its report;
 exits 0/1 the same way `git-release-squash apply` does.
 
 ### 3.2 `add-file <repo> <path> [--as <repo-path>] [--apply]`
@@ -358,20 +460,40 @@ Dry run / `--apply` reporting, backup bundle, verification and exit codes
 follow `replace`'s own shape exactly (§ 3.1), substituting "would add/
 replace `<repo-path>`" for "would change" in the per-commit line.
 
+Both subcommands, dry run or `--apply`, refuse before writing anything if
+an annotated tag's message ends in a signature-shaped block gpg can
+neither verify nor attribute to any key, as git-sign does (D18): `<bin>:
+tag <tag> ends with a signature-shaped block gpg cannot verify or
+attribute to any key -- ...; refusing to guess, resolve manually` (D20,
+AC-71).
+
 ## 4. Shared mechanics
 
 ### 4.1 Backup bundle
 
 `--apply` on any writing subcommand creates
-`<parent-of-repo>/<repo-basename>.backup-<UTC>.bundle` (`git bundle create
+`<parent-of-top>/<top-basename>.backup-<UTC>.bundle` (`git bundle create
 ... --all`, capturing every ref as it stood immediately before any rewrite)
-before touching a single ref. `<UTC>` is `YYYYMMDDTHHMMSSZ` (e.g.
+before touching a single ref. `<top>` is the real path of the top level
+`<repo>` names (§ 0), symlinks resolved, so the bundle is never inside the
+work tree, not even for a link `r/self -> .`, and never next to a link
+far from the repository (D21, AC-84). `<UTC>` is `YYYYMMDDTHHMMSSZ` (e.g.
 `20261010T021500Z`), the wall-clock instant the tool is invoked. The
 bundle's existence and `git bundle verify`-cleanliness are asserted by
 tests; its exact byte content is not (bundles are not reproducible byte
 output, only a restorable snapshot).
 
-**Restore recipe (D14, tested).** `git fetch <bundle> 'refs/*:refs/*'` is
+Every refusal a tool can decide without writing runs before the bundle,
+so a refusal creates none (§ 0, D20, AC-77): the signing key (missing, or
+one gpg cannot read), add-file's "a directory already exists", and
+resign-*'s tag checks (malformed, unsupported type, no dependency order,
+the D18 ambiguous signature). A squash `--map` that cannot be written
+(no such directory, or a directory) is a usage error. Only a failure of the work itself — a
+`--hook`, gpg while signing, the ref transaction (§ 4.5) — comes after
+it, and leaves the bundle in place.
+
+**Restore recipe (D14; AC-90 tests the refusal, the recipe and `clone
+--mirror`; the push-from-mirror refusal below is not tested).** `git fetch <bundle> 'refs/*:refs/*'` is
 refused outright while the repo's HEAD is checked out on a branch the
 fetch would overwrite (`fatal: refusing to fetch into branch '<ref>'
 checked out at '<path>'`) — detach HEAD first:
@@ -384,7 +506,9 @@ git -C <repo> checkout <branch-you-want>   # re-attach HEAD somewhere sane
 
 This restores every ref the bundle captured (every branch and tag, since
 it was created with `--all`) to exactly its pre-rewrite state, in place,
-in the SAME repo. To inspect the bundle's contents instead, without
+in the SAME repo. A ref the run created, such as the tag of `tail
+--tag`, is not in the bundle and survives the restore, since fetch does
+not prune; delete it by hand (`git tag -d <tag>`). To inspect the bundle's contents instead, without
 touching the live repo at all: `git clone --mirror <bundle-path>
 <scratch-dir>` works with no detach needed (a fresh clone has no
 checked-out branch to conflict with) — but pushing FROM that mirror INTO
@@ -458,6 +582,37 @@ warning that still proceeds — a rules/terms file that lives inside the
 repo would otherwise get committed the next time the repo's own history
 is rewritten, which is exactly the leak this whole tool exists to prevent.
 
+### 4.5 Every ref moves in one transaction
+
+**(D20)** `git-release-squash apply`/`tail` and `git-history-rewrite
+replace`/`add-file`, like git-sign's `resign-tags`/`resign-commits`
+(§ 5.3, § 5.5), first build every new object -- each commit with `git
+commit-tree -S`, each annotated tag as a signed tag object written with
+`git hash-object -t tag -w`, which moves no ref -- and only then move
+every branch and tag together in ONE `git update-ref --stdin`
+transaction, each ref checked against its old value (a tag `tail
+--tag` creates must not exist yet). The old values are the ones read
+once, before anything else; `git-history-rewrite` also compares every
+branch and tag with that read once the last tag object is signed, right
+before the transaction, and one created, moved or deleted meanwhile is
+the refusal `refs changed during the run (<ref> created|moved|deleted,
+...); nothing moved, run it again` (AC-78, AC-91). After the transaction
+it reads the refs once more: a branch or tag that is in neither the
+first read nor the transaction is named on stderr, `<bin>: <ref> created
+during the run`, with `, still on the old history` when it points at a
+commit the run rewrote, and the run exits 1 after its verify lines.
+A failure anywhere before or in that
+transaction leaves every ref as it was: `<bin>: ref update transaction
+failed: <git's first stderr line>`, exit 1 (the backup bundle and any
+objects already written stay; AC-74). A new tag's message gets the
+cleanup `git tag -F` applies by default (`git stripspace
+--strip-comments`), so `apply` and `tail` write byte-identical tags to
+before; `replace`/`add-file` keep the old message byte for byte (§ 3.1).
+`tail --tag` with a message that is empty after that cleanup is a usage
+error, `git-release-squash: --tag: the tag message is empty`; one with a
+NUL byte is the usage error `git-release-squash: --tag: the tag message
+contains a NUL byte`, before anything is written (D21, AC-97).
+
 ## 5. git-sign (`bin/git-sign`)
 
 Unlike the other three tools, git-sign never reads or writes `user.signingkey`,
@@ -471,7 +626,15 @@ user.signingkey=<key>` / `-c gpg.program=<wrapper>` on the one invocation that
 signs, and a `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`
 override of `gpg.program` on every `git verify-commit`/`verify-tag`/`tag -v`
 git-sign runs, so a repo's own `gpg.program` is never executed — nothing
-persists in `<repo>/.git/config`.
+persists in `<repo>/.git/config`. Every such pin of `gpg.program` (also
+the `-c gpg.program=<wrapper>` git-release-squash and git-history-rewrite
+sign with) comes with `gpg.format=openpgp` and an empty
+`gpg.ssh.program` and `gpg.x509.program`: git chooses a verifier from a
+signature's own armor, so without them an SSH- or X.509-signed commit in
+a foreign repo made even `check` run that repo's own program, and a repo
+`gpg.format=ssh` made `commit --apply` sign through it (D20, AC-76). An
+SSH or X.509 signature is therefore never verified, only reported as a
+bad signature.
 
 Synopses (`git-sign --help`, § 0):
 
@@ -615,7 +778,10 @@ env vars, because `git commit --amend` otherwise silently keeps the
 Same message/date/signature-time rules as `commit` § 5.1, targeting HEAD
 (the lower bound for `--date`/`auto` is HEAD's own committer date, since a
 tag has no parent chain of its own; the refusal says so: `is not after the
-target's committer date (<date>)`). Refuses if `<tag>` already exists:
+target's committer date (<date>)`). `<tag>` is checked like `tail
+--tag` (§ 1.3) before anything else: an invalid name is the usage error
+`git-sign: <tag>: "<tag>" is not a valid tag name` (D20, AC-73). Refuses
+if `<tag>` already exists:
 `git-sign: tag <tag> already exists -- use resign-tags to re-sign it`
 (no `--force`; that is `resign-tags`'s job, § 5.3). Dry run / `--apply`
 reporting follows `commit`'s shape, substituting `sign: tag <tag>` for
@@ -636,7 +802,8 @@ error (exit 2), naming it.
 With `--apply`: creates the backup bundle first (§ 4.1, reused); for each
 selected tag, re-creates it with the identical target commit, tagger line
 (name/email/date, byte-identical), and message — only the embedded signature
-differs — at signature time per the shared `signTimeFor` rule (§ 5.1/D13):
+differs, and a message without a trailing newline gets one (§ 3.1, AC-79)
+— at signature time per the shared `signTimeFor` rule (§ 5.1/D13):
 the tagger date itself, or, if that predates the signing key, the first
 policy-allowed minute at or after `created + 60s` (never the raw pin,
 which could itself fall inside a forbidden window).
@@ -694,6 +861,12 @@ Read-only; writes nothing, ever (no `--apply`). `<range>` may be given
 positionally or as `--range=<range>` (giving both is a usage error, exit 2
 — § 0's "any further unexpected positional is a usage error" applies here
 too: a third positional, beyond `<repo>` and `<range>`, is also exit 2).
+A `<range>` that starts with `-`, or either end of whose `..`/`...`
+does, is a usage error checked before the repo is read, `git-sign:
+<range> '<r>': a revision must not start with '-'`, and every revision
+reaches git only after `--end-of-options`, so no range is ever read as a
+git option (`--range=--output=<file>` used to make rev-list write
+<file>; D20, AC-75).
 Default, when neither is given, is `@{upstream}..HEAD`; no upstream
 configured is a refusal naming `--range`/the positional form as the way out
 (same silent-on-refusal shape as everywhere else in this spec — this is a
@@ -786,7 +959,8 @@ repo or the policy is even looked at, and each mistake is a usage error
 (two dots, not three)`; an empty side (`main..`, `..main`) — `<range> must
 be '<lower>..<upper>'`; a bare `<rev>` without `--from-root` — below;
 `--from-root` together with a `..` range — `--from-root takes a bare
-<rev>, not a range ('<r>')`.
+<rev>, not a range ('<r>')`; a side starting with `-` — the same `a
+revision must not start with '-'` as § 5.4 (D20, AC-75).
 Merge commits anywhere in the rewritten set are refused, same rule as
 git-release-squash.
 
@@ -862,7 +1036,8 @@ unaffected by D13) instead, exactly as § 5.4 checks it.
 
 Refs: every local branch whose tip is a rewritten commit moves to its new
 hash. Every annotated tag on a rewritten commit is re-created on the new
-hash, same tagger line and message bytes, signature time per the same
+hash, same tagger line and message bytes (a message without a trailing
+newline gets one, § 3.1), signature time per the same
 rule (tagger date, clamped if needed, or the D10 pin); every lightweight
 tag on a rewritten commit moves its ref directly. Remote-tracking refs are
 never touched, never read for this computation (`--branches --tags`, not
@@ -965,9 +1140,11 @@ for another — found dogfooding; superseded by this rule before release.)
 
 One test file per criterion, `test/ac/ac-NN-<slug>.ts`, run via
 `node test/run-all.ts` (defaults to `bin/` next to `test/`; an explicit
-path may be given as the first non-flag argument). Every file reports `CANNOT RUN` (not a
-failure) if the binary it needs does not exist yet — the oracle is
-written before the implementation.
+path may be given as the first non-flag argument). Every file reports `CANNOT RUN` (counted
+apart from the failures) if the binary it needs does not exist — the
+oracle was written before the implementation. A bin that exists but hangs
+or floods its output is a failure, not `CANNOT RUN`, and since all four
+tools exist, any `CANNOT RUN` makes the run exit 1 (D19, AC-69).
 
 | AC | File | Covers |
 |----|------|--------|
@@ -1039,3 +1216,33 @@ written before the implementation.
 | AC-66 | ac-66-harness-config-isolation.ts | harness hygiene: every process a test starts gets `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and an empty `XDG_CONFIG_HOME` under the tmp root (HOME unchanged), so neither the machine's git config nor git-sign's default policy leaks in; `git-sign check` without `--policy` is refused for a missing policy at that isolated location, also under a decoy HOME holding a policy and a `.gitconfig`; mutation-tested per variable |
 | AC-67 | ac-67-harness-cleanup-on-crash.ts | harness hygiene: a test that dies before `T.finish()` -- an uncaught exception, an unhandled rejection, a bare `process.exit()` -- still removes its fixture dirs (an `exit` handler, run once); the harness installs no signal handler, so a SIGTERM during synchronous work (a `spawnSync`, a sync loop) ends the test within about a second, by the signal, without reaching `T.finish()`; `GHT_KEEP=1` keeps the dirs |
 | AC-68 | ac-68-run-all-timeout.ts | run-all: a file still running at the per-file timeout is a FAIL whatever it exits with later, named as timed out; the pool sends SIGTERM, then SIGKILL after a grace period, the serial path kills with SIGKILL; checked pooled and serial with a copy of run-all whose timeout is shortened |
+| AC-69 | ac-69-run-all-cannot-run.ts | run-all/harness: CANNOT RUN only for an absent bin, read from the harness's own header line; a bin that hangs past its timeout or floods past the output limit is a FAIL; the words "CANNOT RUN" in a passing file's output change nothing; any CANNOT RUN makes run-all exit 1, also with no failure; checked with a copy of run-all and a fake bin dir |
+| AC-70 | ac-70-repo-must-be-top-level.ts | § 0 (D20): a subdirectory of a work tree as `<repo>` is a refusal naming the top level, for every subcommand of all four tools (dry run and `--apply`), with no ref moved, no object written, no map file and no bundle anywhere; the top level given with a trailing slash or through a symlink still works, and `replace --apply` there keeps every file outside the subdirectory and puts the bundle next to the top level, never inside the work tree |
+| AC-71 | ac-71-rewrite-tag-message-exact.ts | `replace`/`add-file --apply` (D20): every re-created annotated tag has exactly 1 signature block and its message byte-exact (a signed tag no longer gets its old signature embedded; a `#` line, trailing spaces and a trailing blank line survive), `git tag -v` accepts it and `verify: signatures` says OK; a rule matching only inside the old signature armor is not refused as a tag message change; an unsigned tag ending in an unverifiable signature-shaped block is refused (dry run and `--apply`) with no ref, object or bundle written |
+| AC-72 | ac-72-full-refnames.ts | full refnames (D20): with a branch and a tag sharing a name, `replace --apply`, `apply --apply`, `tail --apply` (HEAD on a branch named like a tag), `resign-tags --apply` and `resign-commits --apply` leave the set of refnames unchanged (no `refs/heads/heads/<x>`/`refs/tags/tags/<x>`), move both real refs, and verify OK |
+| AC-73 | ac-73-tag-name-checked-before-write.ts | new tag names (D20): `tail --tag=<tag>` and `git-sign tag <repo> <tag>` with `bad name`, `-x`, `a..b`, `x.lock`, `x~1` or an empty name are a usage error (exit 2, one stderr line naming the name, nothing on stdout), dry run and `--apply`, with no ref moved, no object written and no bundle; `tail --tag=release/v1 --apply` still creates the tag |
+| AC-74 | ac-74-squash-rewrite-atomic-refs.ts | one ref transaction (§ 4.5, D20): `apply --apply`, `tail --tag --apply`, `replace --apply` and `add-file --apply`, with a pre-existing `<ref>.lock` on the last ref to move, refuse (exit 1, `ref update transaction failed: ...`, nothing on stdout) with every ref unchanged and the backup bundle present; with the lock gone the same run succeeds, every ref moves, each tag object has 1 signature block, its own `tag` header and passes `git tag -v` |
+| AC-75 | ac-75-rev-option-injection.ts | option injection (D20): `check --range=--output=<file>`, `--range=-n1`, a positional `-n1`, `resign-commits -x..HEAD`, `HEAD~1..--output=<file>` and `-x --from-root` are each a usage error (exit 2, one stderr line naming the range, nothing on stdout) and create no file, move no ref, write no object and no bundle; ordinary ranges still run |
+| AC-76 | ac-76-sign-format-pinned.ts | signing format pinned (D17, D20): with a repo `gpg.format=ssh` and `gpg.ssh.program`/`gpg.x509.program` set to a marker script, `check` over an SSH- or X.509-armored commit reports the signature (exit 1) and never runs the script; `commit --apply`, `tail --apply` and `replace --apply` sign with OpenPGP, exit 0, verify OK, and never run it |
+| AC-77 | ac-77-refusals-before-bundle.ts | refusals before the bundle (§ 4.1, D20): `apply`, `tail` and `replace --apply` with no `user.signingkey` or a key gpg cannot read, `add-file --apply` with a directory at the path, and `resign-tags`/`resign-commits --apply` with a policy key not in the keyring or an ambiguous signature-shaped tag (D18) each refuse with exit 1, one stderr line, nothing on stdout, no backup bundle, no ref moved and no object written; `apply --map` into a missing directory or onto a directory is a usage error (exit 2) with the same nothing-written checks |
+| AC-78 | ac-78-rewrite-one-ref-snapshot.ts | one ref snapshot (§ 4.5, D20, Reviewer R1): a `--hook` that, on its first call, creates an annotated tag, moves main, or deletes a tag makes `replace --apply` refuse (exit 1, one stderr line `refs changed during the run (<ref> ...`, nothing on stdout) with the backup bundle kept and no ref moved but the one the hook changed |
+| AC-79 | ac-79-tag-message-no-trailing-newline.ts | a tag message without a trailing newline (§ 3.1, D20, Reviewer R2): with `t-plain` made by `git tag -a --cleanup=verbatim -m` (stored with no newline), a signed one, and one with a `#` line and trailing spaces, `add-file --apply`, `resign-tags --apply` and `resign-commits --apply` exit 0 with no verify line FAILED, every tag passes `git verify-tag`, `t-plain`'s message gains exactly one `\n`, and the other two messages are byte-identical |
+| AC-80 | ac-80-dash-tag-and-git-dir.ts | Reviewer nits (D20): an annotated tag named `-x` (a valid refname `git tag` cannot create) goes through `apply --apply` (exit 0, nothing on stderr, `-x` moved, `git verify-tag` OK, message kept) and `resign-tags --apply` (`verify: -x: OK`); `replace <repo>/.git` is refused naming the work tree as the top level |
+| AC-81 | ac-81-caller-git-env-stripped.ts | caller environment (§ 0, D21, Scout N1/N2): the fixed variable list covers the installed git's `rev-parse --local-env-vars`; `GIT_DIR=B/.git replace A --apply` rewrites A and leaves B alone; `GIT_DIR=A/.git replace A/sub` and `GIT_WORK_TREE=A/sub tail A/sub` are the AC-70 refusal with nothing written; a caller `user.signingkey` via `GIT_CONFIG_PARAMETERS` does not reach `replace --apply`; via `GIT_CONFIG_COUNT`, `gpg.program`, `include.path` and `core.hooksPath` have no effect, while `user.signingkey` (also as `User.SigningKey` next to a dropped `gpg.program`) signs `replace --apply` and `user.name`/`user.email`/`user.signingkey` reach `tail --tag --apply`'s commit, tagger and signature; git-sign `commit --apply` keeps the policy identity and key over them; a caller `gpg.program` via either never runs in `check`; mutation-tested |
+| AC-82 | ac-82-no-repo-hooks-or-fsmonitor.ts | repo hooks and fsmonitor never run (§ 0, D21, Scout N3): with `core.hooksPath` (pre-commit, commit-msg, post-commit, reference-transaction, post-rewrite) and `core.fsmonitor` pointed at marker scripts that plain git does run, `git-sign commit --apply`, `tail --tag --apply`, `replace --apply` and `resign-tags --apply` exit 0 and no marker ran |
+| AC-83 | ac-83-squash-bare-repo.ts | a bare repository (§ 1, D21, Scout N4): `tail --apply`, `tail --tag --apply` and `apply --apply` on a bare clone exit 0 with no stack trace, `verify: signatures: OK`, the refs moved and the bundle next to the bare repo |
+| AC-84 | ac-84-bundle-next-to-real-top-level.ts | the bundle's place (§ 4.1, D21, Scout N5): `replace --apply` through `r/self -> .` (committed in the work tree) and through a symlink elsewhere puts exactly one `<top-basename>.backup-<UTC>.bundle` next to the real top level, none inside the work tree, none next to the path as given, and leaves nothing untracked |
+| AC-85 | ac-85-map-only-after-refs-move.ts | `apply --map` after the refs (§ 1.2, D21, Scout N6): with `refs/tags/v2.lock` present, `apply --apply` refuses with the transaction refusal, no ref moved and no map file; without the lock the same run exits 0 and writes one map line per old commit |
+| AC-86 | ac-86-missing-subcommand.ts | no subcommand (§ 0, D21): `git-release-squash`, `git-history-rewrite` and `git-leak-scan` with no arguments exit 2 with one stderr line `<bin>: missing subcommand (usage: <bin> <subcommands> <repo> ...)` and nothing on stdout |
+| AC-87 | ac-87-scan-secret-shapes.ts | `scan` secret shapes (§ 2.1, D22): `API_KEY=`/`GITHUB_TOKEN=`, `:` and JSON forms, spaces around `=`, `+/` and dotted values, a PGP private key block (also inside a binary blob), AKIA/ASIA, ghp_/gho_/ghs_, xoxb-/xoxp-, a JWT and `Bearer` are each one hit with the exact match; a token inside a longer hit is reported once; a near miss of every shape (no digit in a spaced or `:` value, `monkey=`, a public key block, a short, lowercase or in-word AKIA, an all-X ghp_, a placeholder Slack token, a JWT header alone, `Bearer` in prose) is not a hit; mutation-tested |
+| AC-88 | ac-88-scan-local-paths.ts | `scan` local paths (§ 2.1, D22): `/root/…`, `c:\users\…` in lower and upper case, and `~<name>/…` are hits, the old `/home/`, `/Users/`, `C:\Users\` unchanged; `~/…`, `/srv/root/…`, a lowercase `/users/`, `a~b/`, `~~old/` and `C:\Windows\` are not; mutation-tested |
+| AC-89 | ac-89-scan-blob-cache.ts | `scan` reads each distinct blob once (§ 2.1, D22): with one secret file unchanged over 6 commits and a copy of it under a second path in 3, git's GIT_TRACE shows exactly one `cat-file` per distinct blob, and the hit still counts all 9 (commit, path) pairs |
+| AC-90 | ac-90-bundle-restore-recipe.ts | the restore recipe (§ 4.1, D14; not the push-from-mirror refusal): after `replace --apply` and `apply --apply` (branches, a signed, a lightweight tag moved), `git clone --mirror <bundle>` shows the pre-run refs and leaves the repo alone; `git fetch <bundle> 'refs/*:refs/*' --force` is refused while HEAD is on main; detach, fetch, `checkout main` puts every ref back at its pre-run sha, HEAD on main, the work tree clean with the pre-run content; mutation-tested (a bundle of main only fails it) |
+| AC-91 | ac-91-rewrite-drift-after-signing.ts | the drift check after signing (§ 4.5, D20, Reviewer R1b): with the repo's `gpg.program` a wrapper that, while signing the first tag object, creates `refs/heads/late` (W1) or moves main (W2), `replace --apply` refuses (exit 1, one stderr line `refs changed during the run (<ref> ...`, nothing on stdout) with the backup bundle kept and no ref moved but the one the wrapper changed; a `git` first on PATH that creates `refs/heads/late` right before `update-ref --stdin` gives exit 1, every verify line OK, main moved and exactly `<bin>: refs/heads/late created during the run, still on the old history` for a branch on the old main (W3), without that clause for one on an unrelated commit (W4); mutation-tested |
+| AC-92 | ac-92-scan-long-lines-linear.ts | long lines (§ 2.1, D22, Reviewer R1): a 1 MB single-line file of hex, `a_a_`, `ab.ab.`, `abcd-`, `eyJ`, joined UUIDs, base64url or `x_token: ` each scans to exit 0 or 1 with no stack trace within 15 s (c9a43f9 took 74 s for `ab.ab.` at 64 KB) |
+| AC-93 | ac-93-scan-many-hits-one-blob.ts | many hits in one blob (§ 2.1, D22, Reviewer R2): 40000 `API_KEY=` lines and one `GITHUB_TOKEN=ghp_…` in one file give exit 1, exactly 40001 secret lines (the `ghp_` token once, inside the longer hit), within 6 s |
+| AC-94 | ac-94-scan-secret-shapes-more.ts | more secret shapes (§ 2.1, D22, Reviewer R3): camelCase `authToken`, `dbPassword`, `awsSecretAccessKey`, `clientSecret`, `slackApiKey`, `sshPrivateKey`, `user2Token`, flat `APIKEY`/`apiKey`/`x_apikey`, `github_pat_`, `sk_live_`, `rk_live_`, `AIza`, `glpat-` (also one without a digit) are each one hit with the exact match; `sortKey`/`cacheKey`, camel or flat names without a digit in a spaced value, lowercase `authtoken=`, `apikeys`, `sk_test_`, all-`x` placeholders, too-short bodies and `glpat-` before `your-token-goes-here` are not; mutation-tested |
+| AC-95 | ac-95-refuse-non-utf8.ts | UTF-8 only (§ 0, D21, Scout N1): a tag message with `\351 \377` (`replace --apply` and dry run, `resign-tags --apply`, `apply --apply`), an ISO-8859-1 commit (`replace`, `add-file`, `resign-commits`, `tail`), an ISO-8859-1 header on ASCII text and a commit author with a stray byte (`replace`) each exit 2 with one stderr line `<bin>: <object> is not UTF-8 (...`, nothing on stdout, no ref moved, no bundle, no object written; a CRLF tag message is not refused; mutation-tested |
+| AC-96 | ac-96-no-replace-objects.ts | replace refs off (§ 0, D21, Scout N2): with HEAD replaced by a clean stand-in via `git replace`, `scan` reports the secret in the real HEAD (exit 1), `replace --apply` rewrites the real HEAD (its content and message), and `tail --apply` gives the new commit the real HEAD's tree; mutation-tested |
+| AC-97 | ac-97-tail-message-nul.ts | a NUL in the tag message (§ 4.5, D21, Scout N4): `tail --tag=v2 --message-file=<f>` with a NUL in `<f>`, dry run and `--apply`, exits 2 with exactly `git-release-squash: --tag: the tag message contains a NUL byte`, nothing on stdout, no ref moved and no bundle |
+| AC-98 | ac-98-signingkey-leading-dash.ts | a signing key that is not an option (§ 0, D21, Lead's item 7): a repo `user.signingkey` of `--options=<file>` (`replace --apply`, `tail --tag --apply`) or `-k` (`tail --apply`), and a caller `GIT_CONFIG_KEY_0=User.SigningKey` with `--options=<file>` (`tail --tag --apply`), each exit 2 with exactly `<bin>: user.signingkey "<key>" starts with "-", which gpg would read as an option; nothing written`, nothing on stdout, no ref moved, no bundle, no object written, and the `agent-program` named in `<file>` never runs; `keyCreationTime` alone, given `--options=<file>`, refuses without running it; mutation-tested |

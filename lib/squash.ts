@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /* git-release-squash (docs/SPECIFICATION.md § 1): plan / apply / tail. */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, main } from './cli.ts';
-import { createSigner } from './signer.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
+import { refuseNonUtf8 } from './encoding.ts';
+import { createSigner, buildSignedTagObject } from './signer.ts';
+import type { Signer } from './signer.ts';
 import { createBackupBundle } from './bundle.ts';
 import * as verify from './verify.ts';
 
@@ -15,21 +16,14 @@ interface TagEntry {
   name: string;
   type: 'tag' | 'commit';
   commit: string;
+  /** What refs/tags/<name> points at now: the tag object, or the commit. */
+  obj: string;
 }
 
 interface Group {
   tip: string;
   commits: string[];
   tags: TagEntry[];
-}
-
-interface TmpMsg {
-  path: string;
-  cleanup(): void;
-}
-
-function requireRepo(repo: string): void {
-  if (!git.isRepo(repo)) throw new Refusal('not a git repository (' + repo + ')');
 }
 
 function shortSha(repo: string, env: Env, rev: string): string {
@@ -60,12 +54,12 @@ function defaultName(repo: string): string {
 /** In for-each-ref's own (refname) order. */
 function loadTagIndex(repo: string, env: Env): TagEntry[] {
   const out = git.text(repo,
-    ['for-each-ref', '--format=%(refname:short)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
+    ['for-each-ref', '--format=%(refname)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
     { env });
   if (!out) return [];
   return out.split('\n').map((l): TagEntry => {
-    const [name, type, deref, obj] = l.split('\t');
-    return { name, type: type as 'tag' | 'commit', commit: type === 'tag' ? deref : obj };
+    const [ref, type, deref, obj] = l.split('\t');
+    return { name: git.refBase(ref, 'refs/tags/'), type: type as 'tag' | 'commit', commit: type === 'tag' ? deref : obj, obj };
   });
 }
 
@@ -114,7 +108,7 @@ function renderPlanLines(repo: string, env: Env, name: string):
       const n = i === 0 ? g.commits.length - (g.tags.length - 1) : 1;
       const oldestShort = i === 0 ? groupOldestShort : tipShort;
       const title = titleFor(repo, env, t);
-      const tagShort = shortSha(repo, env, t.name);
+      const tagShort = shortSha(repo, env, 'refs/tags/' + t.name);
       lines.push('plan: ' + t.name + ' folds ' + n + ' commit(s) (' +
         oldestShort + '..' + tagShort + ') into "' + title + '"');
       lines.push('plan: ' + t.name + ' tree equals ' + tagShort + '\'s own tree: OK');
@@ -143,31 +137,49 @@ function rawDateOf(repo: string, env: Env, rev: string, which: string): string {
   return '@' + raw;
 }
 
+/* By full refname, never the bare name: `git tag -l <name>` reads a valid
+ * tag `-x` as an option (D20, AC-80). */
 function tagRawMessage(repo: string, env: Env, name: string): string {
-  const s = git.text(repo, ['tag', '-l', '--format=%(contents:subject)', name], { env });
-  const b = git.text(repo, ['tag', '-l', '--format=%(contents:body)', name], { env }).replace(/\s+$/, '');
+  const s = git.text(repo, ['for-each-ref', '--format=%(contents:subject)', 'refs/tags/' + name], { env });
+  const b = git.text(repo, ['for-each-ref', '--format=%(contents:body)', 'refs/tags/' + name], { env }).replace(/\s+$/, '');
   return s + (b ? '\n\n' + b : '') + '\n';
 }
 
-function writeTmpMsg(msg: string): TmpMsg {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-tagmsg-'));
-  try {
-    const p = path.join(dir, 'msg.txt');
-    fs.writeFileSync(p, msg);
-    return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } } };
-  } catch (e) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* best effort */ }
-    throw e;
-  }
+/** A new tag's message exactly as `git tag -F` used to store it: its
+ * default cleanup (`strip`: trailing whitespace, blank-line runs and
+ * comment lines, with the repo's own core.commentChar), now that the tag
+ * object is built by hand (D20). */
+function cleanTagMessage(repo: string, env: Env, msg: string): string {
+  const r = git.run(repo, ['stripspace', '--strip-comments'], { env, input: msg });
+  if (r.status !== 0) throw new git.GitError(['stripspace', '--strip-comments'], r);
+  return r.stdout as string;
 }
 
+/** Builds the signed tag object for `name` -> `commit`, tagged by the
+ * committer ident git sees under `env`, without touching any ref. */
+function buildTag(repo: string, env: Env, signer: Signer, name: string, commit: string, message: string): string {
+  return buildSignedTagObject(repo, env, signer, {
+    object: commit, type: 'commit', name, taggerLine: git.committerIdent(repo, env), message: cleanTagMessage(repo, env, message),
+  });
+}
+
+function moveRefsOrRefuse(repo: string, env: Env, message: string, moves: git.RefMove[]): void {
+  const r = git.moveRefs(repo, env, message, moves);
+  if (r.status !== 0) throw new Refusal('ref update transaction failed: ' + (r.stderr as string).trim().split('\n')[0]);
+}
+
+/** HEAD's branch as a FULL refname (`refs/heads/x`), never `--short`,
+ * which prints `heads/x` when a tag `x` exists too (D20, AC-72). */
 function currentBranch(repo: string, env: Env): string {
-  const r = git.run(repo, ['symbolic-ref', '--short', 'HEAD'], { env });
+  const r = git.run(repo, ['symbolic-ref', 'HEAD'], { env });
   if (r.status !== 0) throw new Refusal('HEAD is detached');
   return (r.stdout as string).replace(/\n$/, '');
 }
 
+/** A bare repository has no work tree to be dirty; `git status` there is
+ * an error, not an answer (D21, AC-83). */
 function isDirty(repo: string, env: Env): boolean {
+  if (git.text(repo, ['rev-parse', '--is-bare-repository'], { env }) === 'true') return false;
   return git.text(repo, ['status', '--porcelain', '--untracked-files=no'], { env }) !== '';
 }
 
@@ -194,6 +206,12 @@ function cmdApply(bin: string, args: string[]): void {
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
   if (!flags.map) throw new UsageError('missing --map');
+  /* The map is written after the backup bundle; a path it cannot be written to is a usage error first (D20, AC-77). */
+  const mapPath = path.resolve(flags.map as string);
+  if (!fs.existsSync(path.dirname(mapPath)) || !fs.statSync(path.dirname(mapPath)).isDirectory()) {
+    throw new UsageError('--map: no such directory: ' + path.dirname(mapPath));
+  }
+  if (fs.existsSync(mapPath) && fs.statSync(mapPath).isDirectory()) throw new UsageError('--map: is a directory: ' + mapPath);
   const dates = (flags.dates as string) || 'anon';
   if (dates !== 'anon' && dates !== 'keep') throw new UsageError('--dates must be \'anon\' or \'keep\'');
   requireRepo(repo);
@@ -205,6 +223,8 @@ function cmdApply(bin: string, args: string[]): void {
   const tags = loadTagIndex(repo, env);
   const { groups, tailCommits } = groupsFromTags(allCommits, tags);
   const headTagged = groups.length > 0 && groups[groups.length - 1].tip === oldHead;
+  /* Every tag is re-created with its message: UTF-8 only (D21, AC-95). */
+  refuseNonUtf8(repo, env, groups.flatMap((g) => g.tags).filter((t) => t.type === 'tag').map((t) => ({ sha: t.obj, label: 'tag ' + t.name })));
   if (!headTagged) throw new Refusal('HEAD is not tagged -- run \'tail\' first');
 
   const name = (flags.name as string) || defaultName(repo);
@@ -219,10 +239,10 @@ function cmdApply(bin: string, args: string[]): void {
   if (isDirty(repo, env)) throw new Refusal('working tree is dirty');
   const branch = currentBranch(repo, env);
 
-  createBackupBundle(repo, env);
+  /* The signer's refusals (no key, a key gpg cannot read) before the backup bundle (§ 0, D20, AC-77). */
   const signer = createSigner(repo, env);
-  const tmpFiles: TmpMsg[] = [];
   try {
+    createBackupBundle(repo, env);
     let parent: string | null = null;
     const commitResults: { g: Group; nc: string; committerDate: string; origTree: string; newTree: string }[] = [];
     const mapLines: string[] = [];
@@ -248,24 +268,24 @@ function cmdApply(bin: string, args: string[]): void {
     }
     const newHead = commitResults[commitResults.length - 1].nc;
 
-    fs.writeFileSync(flags.map as string, mapLines.length ? mapLines.join('\n') + '\n' : '');
-
+    /* Every object first (the commits above, every tag object here), then
+     * every ref in ONE transaction against its old value: a failure
+     * anywhere moves nothing (D20, AC-74). `git tag -f -s` per tag used to
+     * create the object and move its ref in one step. */
+    const moves: git.RefMove[] = [];
     for (const { g, nc, committerDate } of commitResults) {
       for (const t of g.tags) {
-        if (t.type === 'tag') {
-          const msg = tagRawMessage(repo, env, t.name);
-          const tmp = writeTmpMsg(msg);
-          tmpFiles.push(tmp);
-          git.text(repo, ['tag', '-f', '-s', '-F', tmp.path, t.name, nc], {
-            env: Object.assign({}, env, { GIT_COMMITTER_DATE: committerDate }),
-            config: signer.gitConfig,
-          });
-        } else {
-          git.text(repo, ['update-ref', 'refs/tags/' + t.name, nc], { env });
-        }
+        const newObj = t.type === 'tag'
+          ? buildTag(repo, Object.assign({}, env, { GIT_COMMITTER_DATE: committerDate }), signer, t.name, nc, tagRawMessage(repo, env, t.name))
+          : nc;
+        moves.push({ ref: 'refs/tags/' + t.name, newSha: newObj, oldSha: t.obj });
       }
     }
-    git.text(repo, ['update-ref', '-m', 'git-release-squash apply', 'refs/heads/' + branch, newHead, oldHead], { env });
+    moves.push({ ref: branch, newSha: newHead, oldSha: oldHead });
+    moveRefsOrRefuse(repo, env, 'git-release-squash apply', moves);
+    /* Only now: a failed transaction leaves no map of commits no ref
+     * points at (D21, AC-85). Its directory was checked up front (AC-77). */
+    fs.writeFileSync(mapPath, mapLines.length ? mapLines.join('\n') + '\n' : '');
 
     const results = [
       verify.verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree }))),
@@ -276,7 +296,6 @@ function cmdApply(bin: string, args: string[]): void {
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {
     signer.cleanup();
-    for (const t of tmpFiles) t.cleanup();
   }
 }
 
@@ -301,6 +320,9 @@ function cmdTail(bin: string, args: string[]): void {
   } else if (hasMessage || hasMessageFile) {
     throw new UsageError('--message/--message-file require --tag');
   }
+  if (flags.tag !== undefined && !git.isValidTagName(flags.tag as string)) {
+    throw new UsageError('--tag: ' + JSON.stringify(flags.tag) + ' is not a valid tag name');
+  }
   const tagMessageText: string | null = hasMessage ? (flags.message as string) :
     (hasMessageFile ? fs.readFileSync(flags['message-file'] as string, 'utf8') : null);
 
@@ -319,6 +341,16 @@ function cmdTail(bin: string, args: string[]): void {
   const { groups, tailCommits } = groupsFromTags(allCommits, tags);
   const headTagged = groups.length > 0 && groups[groups.length - 1].tip === headSha;
   if (headTagged) throw new Refusal('HEAD is already tagged, nothing to squash');
+  /* Without --tag the new commit takes HEAD's subject: UTF-8 only (D21, AC-95). */
+  if (flags.tag === undefined) refuseNonUtf8(repo, env, [{ sha: headSha, label: 'commit ' + headSha.slice(0, 7) }]);
+
+  /* git cannot take a NUL in a message; it crashed after the bundle (D21, Scout N4, AC-97). */
+  if (flags.tag !== undefined && (tagMessageText as string).includes('\u0000')) {
+    throw new UsageError('--tag: the tag message contains a NUL byte');
+  }
+  if (flags.tag !== undefined && cleanTagMessage(repo, env, tagMessageText as string) === '') {
+    throw new UsageError('--tag: the tag message is empty');
+  }
 
   const name = (flags.name as string) || defaultName(repo);
   const title = flags.tag !== undefined ? (tagMessageText as string).split('\n')[0] :
@@ -339,10 +371,10 @@ function cmdTail(bin: string, args: string[]): void {
   const branch = currentBranch(repo, env);
   const parentCommit = groups.length > 0 ? groups[groups.length - 1].tip : null;
 
-  createBackupBundle(repo, env);
+  /* The signer's refusals (no key, a key gpg cannot read) before the backup bundle (§ 0, D20, AC-77). */
   const signer = createSigner(repo, env);
-  const tmpFiles: TmpMsg[] = [];
   try {
+    createBackupBundle(repo, env);
     const tree = git.text(repo, ['rev-parse', headSha + '^{tree}'], { env });
     const position = groups.length;
     const when = dates === 'anon' ? anonDateAt(position) : rawDateOf(repo, env, headSha, 'a');
@@ -356,14 +388,16 @@ function cmdTail(bin: string, args: string[]): void {
     });
     const newTree = git.text(repo, ['rev-parse', nc + '^{tree}'], { env });
 
-    git.text(repo, ['update-ref', '-m', 'git-release-squash tail', 'refs/heads/' + branch, nc, headSha], { env });
-
+    /* The commit, then the tag object, then both refs in ONE transaction
+     * (D20, AC-74): the branch used to move first, so a tag that failed
+     * left it moved and no tag. The tag ref must not exist yet. */
+    const moves: git.RefMove[] = [{ ref: branch, newSha: nc, oldSha: headSha }];
     if (flags.tag !== undefined) {
-      const tmp = writeTmpMsg(tagMessageText as string);
-      tmpFiles.push(tmp);
       const tagEnv = dates === 'anon' ? Object.assign({}, env, { GIT_COMMITTER_DATE: whenC }) : env;
-      git.text(repo, ['tag', '-s', '-F', tmp.path, flags.tag as string, nc], { env: tagEnv, config: signer.gitConfig });
+      const tagObj = buildTag(repo, tagEnv, signer, flags.tag as string, nc, tagMessageText as string);
+      moves.push({ ref: 'refs/tags/' + flags.tag, newSha: tagObj, oldSha: null });
     }
+    moveRefsOrRefuse(repo, env, 'git-release-squash tail', moves);
 
     const results = [
       verify.verifyTreeDelta([{ label: headSha, expected: tree, actual: newTree }]),
@@ -373,13 +407,13 @@ function cmdTail(bin: string, args: string[]): void {
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {
     signer.cleanup();
-    for (const t of tmpFiles) t.cleanup();
   }
 }
 
 main('git-release-squash', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' plan|apply|tail <repo> ...)');
   if (sub === 'plan') return cmdPlan(bin, rest);
   if (sub === 'apply') return cmdApply(bin, rest);
   if (sub === 'tail') return cmdTail(bin, rest);

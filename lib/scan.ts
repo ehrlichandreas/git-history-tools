@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* git-leak-scan (docs/SPECIFICATION.md § 2): scan. */
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, main } from './cli.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
 import * as leakscan from './leakscan.ts';
 
 type Env = NodeJS.ProcessEnv;
@@ -16,7 +16,8 @@ interface Target {
   path: string;
   kind: 'text' | 'blob';
   text?: string;
-  buf?: Buffer;
+  /** For a blob: its sha, read when scanned (once per sha, D22). */
+  sha?: string;
 }
 
 interface AggEntry {
@@ -25,10 +26,6 @@ interface AggEntry {
   count: number;
   firstCommit: string;
   firstPath: string;
-}
-
-function requireRepo(repo: string): void {
-  if (!git.isRepo(repo)) throw new Refusal('not a git repository (' + repo + ')');
 }
 
 function shortSha(repo: string, env: Env, rev: string): string {
@@ -65,19 +62,16 @@ function collectTargets(repo: string, env: Env): Target[] {
     const message = git.text(repo, ['log', '-1', '--format=%B', c], { env });
     targets.push({ commit: c, path: '(message)', kind: 'text', text: message });
     targets.push({ commit: c, path: '(identity)', kind: 'text', text: identityText(repo, env, c) });
-    for (const b of listTreeBlobs(repo, env, c)) {
-      const buf = git.buffer(repo, ['cat-file', '-p', b.sha], { env });
-      targets.push({ commit: c, path: b.path, kind: 'blob', buf });
-    }
+    for (const b of listTreeBlobs(repo, env, c)) targets.push({ commit: c, path: b.path, kind: 'blob', sha: b.sha });
   }
   const tagsRaw = git.text(repo,
-    ['for-each-ref', '--format=%(refname:short)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
+    ['for-each-ref', '--format=%(refname)\t%(objecttype)\t%(*objectname)\t%(objectname)', 'refs/tags'],
     { env });
   for (const l of (tagsRaw ? tagsRaw.split('\n') : [])) {
-    const [name, type, deref, obj] = l.split('\t');
+    const [ref, type, deref, obj] = l.split('\t');
     if (type !== 'tag') continue;
-    const msg = git.text(repo, ['for-each-ref', '--format=%(contents)', 'refs/tags/' + name], { env });
-    const tagger = git.text(repo, ['for-each-ref', '--format=%(taggername) <%(taggeremail)>', 'refs/tags/' + name], { env });
+    const msg = git.text(repo, ['for-each-ref', '--format=%(contents)', ref], { env });
+    const tagger = git.text(repo, ['for-each-ref', '--format=%(taggername) <%(taggeremail)>', ref], { env });
     targets.push({ commit: deref || obj, path: '(tag-message)', kind: 'text', text: msg });
     targets.push({ commit: deref || obj, path: '(identity)', kind: 'text', text: tagger });
   }
@@ -103,15 +97,25 @@ function cmdScan(bin: string, args: string[]): void {
   const agg = new Map<string, AggEntry>();
   const order: string[] = [];
 
+  /* A blob's hits depend on its content alone, so each distinct blob is
+   * read and scanned once, however many commits and paths it sits at
+   * (D22, AC-89); the counts below still go per (commit, path). */
+  const blobHits = new Map<string, leakscan.Hit[]>();
   for (const t of targets) {
     let hits: leakscan.Hit[];
     if (t.kind === 'blob') {
-      const buf = t.buf!;
-      if (leakscan.isBinary(buf)) {
-        hits = leakscan.scanPemInBuffer(buf);
+      const cached = blobHits.get(t.sha!);
+      if (cached) {
+        hits = cached;
       } else {
-        const text = buf.toString('utf8');
-        hits = leakscan.scanBuiltins(text).concat(leakscan.scanTerms(text, terms));
+        const buf = git.buffer(repo, ['cat-file', '-p', t.sha!], { env });
+        if (leakscan.isBinary(buf)) {
+          hits = leakscan.scanPemInBuffer(buf);
+        } else {
+          const text = buf.toString('utf8');
+          hits = leakscan.scanBuiltins(text).concat(leakscan.scanTerms(text, terms));
+        }
+        blobHits.set(t.sha!, hits);
       }
     } else {
       hits = leakscan.scanBuiltins(t.text!).concat(leakscan.scanTerms(t.text!, terms));
@@ -131,11 +135,15 @@ function cmdScan(bin: string, args: string[]): void {
     }
   }
 
+  /* One `rev-parse --short` per commit, not per line: 40000 hits from one
+   * commit were 40000 git processes (AC-93). */
+  const shorts = new Map<string, string>();
   const lines: string[] = [];
   for (const key of order) {
     const e = agg.get(key)!;
     if (allow.has(e.match)) continue;
-    const short = shortSha(repo, env, e.firstCommit);
+    let short = shorts.get(e.firstCommit);
+    if (short === undefined) { short = shortSha(repo, env, e.firstCommit); shorts.set(e.firstCommit, short); }
     lines.push('scan: ' + e.category + ' ' + e.match + ' (' + e.count + ') first at ' + short + ':' + e.firstPath);
   }
   process.stdout.write(lines.map((l) => l + '\n').join(''));
@@ -145,6 +153,7 @@ function cmdScan(bin: string, args: string[]): void {
 main('git-leak-scan', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' scan <repo> ...)');
   if (sub === 'scan') return cmdScan(bin, rest);
   throw new UsageError('unknown subcommand \'' + sub + '\'');
 });

@@ -29,8 +29,9 @@ rewrite existing history (`git-release-squash apply`/`tail`,
 `git-history-rewrite`, `git-sign resign-tags`/`resign-commits`) write a
 backup bundle first and verify the result afterwards. Nothing is ever pushed.
 
-Requirements: Node.js ≥ 24 and git, plus gpg (always for git-sign; for the
-other tools only if the commits are signed).
+Requirements: Node.js ≥ 24, git and gpg. Every `--apply` of
+git-release-squash and git-history-rewrite signs the commits and tags it
+writes, and git-sign always uses gpg; only git-leak-scan never runs it.
 There are no other dependencies.
 
 ```sh

@@ -128,8 +128,11 @@ export function runBin(name: string, args: string[], opts?: RunBinOpts): RunBinR
     timeout: o.timeout || 30000,
     maxBuffer: 32 * 1024 * 1024,
   });
+  /* `missing` is only ever "the bin is not there" (above). A spawn error
+   * of a bin that exists -- ETIMEDOUT, ENOBUFS -- is a null status, so
+   * the test FAILS instead of reading as an unbuilt tool (AC-69). */
   if (r.error) {
-    return { status: null, stdout: '', stderr: String(r.error.message), missing: 'spawn failed: ' + r.error.message };
+    return { status: null, stdout: r.stdout || '', stderr: (r.stderr || '') + 'runBin: ' + r.error.message, signal: r.signal };
   }
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', signal: r.signal };
 }

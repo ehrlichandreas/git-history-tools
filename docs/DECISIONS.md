@@ -1206,3 +1206,461 @@ and the run waited for it. Now:
   made stays in the run root, which the leak sweep reports and removes.
 - This is the same rule as nanojira's harness and runner (its DECISIONS
   193, revised for its TSK-028).
+
+**Revised (v0.4.4): CANNOT RUN means the bin is absent, and fails the run
+(AC-69).** `runBin()` used to mark every spawn error as `missing`, a
+timeout and an output overflow included, and run-all counted a file as
+CANNOT RUN wherever the words appeared in its output, then exited 0. So a
+tool that hung passed `npm test` as "1 cannot run". Now:
+- `missing` is only "the bin does not exist". A bin that exists but
+  times out or overflows gives a null status, so the test FAILS.
+- run-all counts CANNOT RUN only from the harness's own header line,
+  `FAIL <file> -- CANNOT RUN` (as nanojira does), and never for a file
+  that timed out.
+- Any CANNOT RUN makes run-all exit 1. "Not a failure" made sense while
+  the oracle was written before the tools; all four exist now, so a
+  CANNOT RUN can only be a bin that went missing (a wrong bin dir, a
+  broken install), and a run that tested less than it should must not
+  pass. It is still counted apart from the failures.
+
+## D20: the writing tools report success on a corrupted result, and a read-only check can write (v0.4.4, ImprovementScout's survey § 2 and § 5)
+
+The survey reproduced each of these with a throwaway key; in every
+writing case all of the tool's own `verify:` lines said OK. One fix per
+item, each with its own AC test, written red first.
+
+**`<repo>` must be the top level (AC-70).** `isRepo` asked `rev-parse
+--git-dir`, which succeeds anywhere inside a work tree, and the rewrite
+walks trees relative to `-C <repo>`. So `replace <repo>/sub --apply`
+rewrote the whole history down to `sub/`'s tree: every file outside it
+was gone, all three verify lines said OK, and the backup bundle went
+next to `sub/`, inside the work tree, as an untracked file. Every tool now
+shares one `requireRepo`: `<repo>` must resolve (symlinks, trailing
+slash) to `rev-parse --show-toplevel`, or to a bare repository's own git
+dir, else it is a refusal naming the top level. Refusing, not quietly
+using the top level, because the caller named a subdirectory and almost
+certainly meant something else. `createBackupBundle` checks the same
+thing again, so a bundle can never land inside the work tree.
+
+**A re-created tag keeps its message and has one signature (AC-71).**
+`replace` and `add-file` took a tag's message from `for-each-ref
+--format=%(contents)`, which for a signed tag includes the old signature:
+the re-signed tag carried two blocks (git-sign's own D14 bug), and
+`verify: signatures` said OK, because `git verify-tag` checks the first.
+`git tag -F` also cleaned the message up (`#` lines, trailing spaces).
+The message now comes from `tagMessageFromRaw`, moved from `lib/sign.ts`
+to `lib/siginfo.ts` so both tools share the one boundary walk, and is
+signed as it is by `buildSignedTagObject`; no `git tag` runs any more
+(AC-74). One exception (Reviewer R2, AC-79): a non-empty message
+without a trailing newline, as `git tag -a --cleanup=verbatim -m x`
+stores it, gets one. Signed verbatim, the signature began mid-line
+("x-----BEGIN PGP SIGNATURE-----"), `git verify-tag` found no
+signature, and every ref had already moved. git-sign's resign-tags and
+resign-commits build their tags with the same function, so they had the
+same bug; resign-tags' own byte check now expects that one newline. The
+replace rules' "tag message would
+change" refusal reads the same message. A tag ending in a
+signature-shaped block gpg can neither verify nor attribute is refused,
+exactly as git-sign refuses it (D18), in the dry run too.
+
+**Full refnames (AC-72).** Every tool read refs with `%(refname:short)`
+(and squash HEAD's branch with `symbolic-ref --short`), then prefixed
+`refs/heads/`/`refs/tags/` again. When a branch and a tag share a name,
+git shortens them to `heads/x` and `tags/x`, so `replace` and `apply`
+moved `refs/heads/heads/x` and `refs/tags/tags/x`, new refs, while the
+real ones stayed on the old history; `tail` and `apply` crashed on
+`update-ref`, and git-sign's `resign-*` would have done the same. Every
+read now takes `%(refname)`, every write and verify uses it, and
+`git.refBase` cuts the plain name for output and for a tag object's own
+`tag` header.
+
+**A new tag name is checked before anything else (AC-73).** `tail
+--tag=<tag>` never checked the name: `--tag='bad name'` passed its dry run,
+then `--apply` moved the branch, failed in `git tag -s`, and crashed with
+a stack trace, leaving the branch moved and no tag. `git-sign tag` left
+the check to `git tag` too. Both now run `git check-ref-format
+refs/tags/<tag>`, and refuse a leading `-`, which check-ref-format
+allows but no argv should take, first thing. A usage error (exit 2), not
+a refusal: the name is wrong whatever the repository holds. The other
+names the tools write are read from existing refs, so they are valid
+already. The order of the writes themselves is item 5.
+
+**Objects first, then every ref in one transaction (AC-74).**
+`git-release-squash` and `git-history-rewrite` moved refs one at a time:
+`update-ref` per branch (rewrite: no old value either), `git tag -f -s`
+per annotated tag, which writes the object and moves its ref in one step.
+A failure partway (a locked ref, a gpg error) left a half-moved
+repository and a stack trace; `tail --tag` moved the branch before
+creating the tag. They now do what git-sign's resign-* do since D14:
+build every commit and every tag object first, the tag objects with
+`buildSignedTagObject` (moved from `lib/sign.ts` to `lib/signer.ts`),
+then one `update-ref --stdin` transaction with old values (`create` for
+`tail`'s new tag), via `git.moveRefs`; a failed transaction is a refusal.
+The hand-built tag must equal what `git tag -s` wrote: the tagger is `git
+var GIT_COMMITTER_IDENT` under the same environment, and the message
+gets `git tag`'s default cleanup (`git stripspace --strip-comments`) for
+`apply`/`tail`, while `replace`/`add-file` keep the old message verbatim
+(AC-71). Checked: v0.4.3 and this code, run on copies of one repository
+with one throwaway key and `--dates=anon`, produce byte-identical refs
+for `tail --tag` (a message with a comment line and trailing spaces) and
+`apply`. `tail --tag` with a message that cleans up to nothing is now a
+usage error up front; `git tag` used to refuse it after the branch had
+moved.
+
+Revised after review (Reviewer R1, AC-78): git-history-rewrite read the
+refs twice, once for the tag messages before the bundle, once for the
+moves and their old values after the work. So the old values were
+whatever the refs were by then, and a ref changed in between was never
+caught. A tag created mid-run had no message in the first read and was
+re-created with the message "undefined" (exit 1, every ref moved); main
+moved mid-run left main on the old history while the tags moved (exit
+0, verify OK). Now one snapshot, taken first, gives the messages, the
+moves and the old values; when the work is done, every branch and tag
+is compared with it, and one created, moved or deleted is a refusal
+before the transaction. git-release-squash already read its refs once.
+
+Revised again (Reviewer R1b, AC-91): that comparison ran before the tag
+loop, and signing a tag can take seconds (pinentry, a smartcard). A
+branch created while a tag was signed was in neither the snapshot nor
+the transaction: exit 0, verify OK, the replaced text still reachable
+from it. The comparison now runs after the last tag object is signed,
+right before the transaction, so a ref moved meanwhile gets the drift
+message too instead of the transaction's. AC-91 changes a ref from a
+`gpg.program` wrapper while it signs. Lead's optional part is in as
+well: after the transaction the refs are read once more, and a branch
+or tag in neither the snapshot nor the moves is named (`<ref> created
+during the run, still on the old history`) with exit 1. Moved and
+deleted refs need no such check, since the transaction's old values
+catch them. The window that check covers, between the comparison and
+the transaction, runs no repo code, so the gpg.program wrapper cannot
+reach it. A `git` first on PATH can: Reviewer's window3.sh creates a
+branch right before `update-ref --stdin`, and AC-91's W3 and W4 legs
+do the same. With the re-read removed, both fail. After review
+(Reviewer's nit N2) the line says "still on the old history" only when
+the late ref points at a commit the run rewrote (W3, a branch on the
+old main); a ref on any other commit is just "created during the run"
+(W4). Exit 1 either way: the run cannot vouch for a ref it never saw.
+
+**No revision is read as an option (AC-75).** `check <repo>
+--range=--output=<file>` printed "invalid revision range" and exited 1,
+and had created `<file>`: rev-list took the range as its own `--output`.
+The "read-only" check wrote a file. Two layers now. Every revision range
+the caller gives (`check`'s, both ends of `resign-commits'`) is a usage
+error if it, or a side of its `..`/`...`, starts with `-`, before the
+repo is read: a shape question, like resign-commits' other range checks
+(D17). And every git call that takes a revision gets `--end-of-options`
+before it (`resolveRevList`, `rev-parse --verify`), which on its own
+already stops the write (checked with the `-` refusal removed: rc 1, no
+file). The other three tools take no revision from the caller, and the
+tag names they and `git-sign tag` take are checked in AC-73.
+
+**gpg.program is never pinned alone (AC-76).** D17's rule is that a
+foreign repository's config must not run code, and git-sign pinned
+`gpg.program` for that. But git has three signing programs: with a repo
+`gpg.format=ssh` and `gpg.ssh.program=<script>`, `commit --apply` signed
+through the script, and since git picks a verifier from the signature's
+own armor, an SSH- or X.509-signed commit made the read-only `check` run
+`gpg.ssh.program` or `gpg.x509.program`, whatever gpg.format said. Every
+pin (git-sign's `GIT_CONFIG_*` environment, and the signer's `-c`
+options, which git-release-squash and git-history-rewrite sign with too)
+now also sets `gpg.format=openpgp` and empties the other two programs
+(`PIN_OTHER_SIGNERS` in `lib/signer.ts`). An SSH or X.509 signature is
+then never verified, only reported as bad; SSH signing would need its own
+policy field. Not changed: git-release-squash and git-history-rewrite
+verify with the repo's own config, as they always have, since they also
+sign with the repo's own key and gpg.program; the D17 boundary is
+git-sign's.
+
+**Every refusal before the bundle (AC-77).** § 0 says a refusal creates
+no bundle, but several came after `createBackupBundle`: the signer's (no
+`user.signingkey`, or a key gpg cannot read) in git-release-squash and
+git-history-rewrite, add-file's "a directory already exists at <path>",
+and in resign-tags/resign-commits the unreadable policy key and the
+per-tag checks (malformed object, unsupported type, no dependency order,
+D18's ambiguous signature). Each refused correctly but left a bundle
+next to the repo. The signer is now created before the bundle; add-file
+checks every distinct tree read-only first (`refuseDirectoryAt`); resign-*
+read the key's creation time once and run the tag checks as a pre-pass
+(resign-commits simulates its recreation order by name). The checks in
+the work loops stay, and can no longer fire. What still comes after the
+bundle is the work failing, not a precondition: a `--hook` exiting
+non-zero, gpg failing to sign, the ref transaction (§ 4.5). Found on
+the way: squash apply's `--map` in a directory that does not exist, or
+naming a directory, crashed when the map was written, after the bundle
+and the new objects; it is now a usage error before the repo is read.
+
+**Review nits (AC-80).** A tag named `-x` passes `check-ref-format
+refs/tags/-x`; only `git tag` refuses to create one. Two calls still
+passed a bare tag name to `git tag`, which read `-x` as an option:
+squash apply read a tag's message with `git tag -l --format=… <name>`,
+and crashed with `unknown switch 'x'` after the bundle and the new
+objects; resign-tags' verify ran `git tag -v <name>` and reported a good
+tag as `FAILED (signature not accepted)`. They now use `for-each-ref
+refs/tags/<name>` and `verify-tag refs/tags/<name>`. And `<repo>` given
+as a work tree's `.git` was refused with "the top level is unknown",
+because git shows no top level from inside a git dir; `git.topLevel` now
+names the work tree there (`core.worktree`, or the git dir's parent).
+
+## D21: caller env and repo config cannot redirect or extend a ght write (v0.4.4, Scout's attack on 5cfa6f3)
+
+The Scout's attack script (`/tmp/team/scout-ght044-attack.sh`) confirmed
+every D20 fix and found six older gaps, all present in v0.4.3 too. Each
+is fixed below with its own test.
+
+**The caller's environment (N1, N2; AC-81).** git reads `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_CONFIG_PARAMETERS` and the rest of `git rev-parse
+--local-env-vars` before any `-C <repo>`. So `GIT_DIR=B/.git replace A
+--apply` rewrote B (and put its bundle next to A).
+`GIT_DIR=A/.git replace A/sub` passed AC-70's top-level check and
+rewrote A. A caller's `GIT_CONFIG_PARAMETERS` `gpg.program` ran inside
+git-sign `check`, since git-sign's pins arrive as `GIT_CONFIG_COUNT`.
+Lead's decision: strip, never refuse. A tool run from a git hook, where
+git sets `GIT_DIR`, must keep working, and `<repo>` decides. `main`
+deletes the listed variables, and `GIT_CONFIG_KEY_<n>`/`VALUE_<n>`, from
+`process.env` before anything runs, which also covers gpg and `--hook`
+child processes. `git.run` drops the list again from whatever
+environment a call passes, keeping only the `GIT_CONFIG_COUNT` family:
+by then that can only be git-sign's own pins. The list is fixed in code
+(`CALLER_GIT_ENV`, git 2.53's output). AC-81 checks it covers the
+installed git's `--local-env-vars`, so a newer git that adds one turns
+the test red. Mutation check: with `main`'s strip removed, the
+`GIT_CONFIG_COUNT` case fails. `git.run`'s own strip is a second layer
+for the same variables, so removing it alone fails nothing.
+
+**Repo hooks and fsmonitor (N3; AC-82).** D17 pinned the signing
+programs, but other repo config still ran code. `git-sign commit
+--apply` ran the repo's `pre-commit`, `commit-msg` and `post-commit`
+(`core.hooksPath`) and its `core.fsmonitor`. Every tool's `update-ref`
+ran a `reference-transaction` hook, and squash's dirty check ran the
+fsmonitor. Lead's decision applies to every tool, not git-sign only:
+`git.run` puts `-c core.hooksPath=/dev/null -c core.fsmonitor=false` in
+front of every call. No other code path in `lib/` spawns git against a
+repository (`check-ref-format` reads none). Filter drivers and, outside
+git-sign, the repo's `gpg.program` still run: they sit at the same trust
+level as the rest of the repo config the tools honour, by design.
+
+**A bare repository (N4; AC-83).** A bare repository is a valid top
+level (§ 0), but squash `tail --apply` and `apply --apply` ran their
+dirty check, `git status`, which needs a work tree. The result was a
+GitError stack trace and exit 1, after nothing had been written. A bare
+repository has no work tree to be dirty, so `isDirty` is false there
+and the run goes on as usual.
+
+**The bundle next to the real top level (N5; AC-84).** D20 said
+`createBackupBundle`'s own top-level check meant a bundle could never
+land inside the work tree. It could. The check compares real paths, but
+the bundle went next to the path as given. `r/self -> .`, a link
+committed in the work tree, passes the check and put
+`self.backup-<UTC>.bundle` inside `r` as an untracked file; a symlink
+elsewhere put the bundle next to the link. D20 had kept the path as
+given for symlinked repos; Lead's decision is the real path. The bundle
+is now named after, and placed next to, `realpath(<top level>)`.
+
+**The map after the refs (N6; AC-85).** squash `apply` wrote `--map`
+before its ref transaction, so a failed transaction left a map of
+commits no ref points at. It is now written right after
+`moveRefsOrRefuse` succeeds. Its directory is checked before the bundle
+(AC-77), so the write that remains after the refs move is the one for an
+existing, writable directory. `resign-commits --map-out` already came
+after its refs moved.
+
+**No subcommand (AC-86).** Cosmetic, from the same attack run:
+git-release-squash, git-history-rewrite and git-leak-scan said `unknown
+subcommand 'undefined'`. They now name what is missing and list their
+subcommands on the one usage line.
+
+**UTF-8 only (Scout's re-attack N1; AC-95).** Messages, authors and
+taggers pass through JavaScript strings on their way into a new object.
+So bytes that are not UTF-8 became U+FFFD, and a commit's `encoding`
+header was dropped. `replace` re-signed a tag whose message had `\351
+\377` in it and exited 0. `resign-tags` moved the ref and only then
+said verify FAILED. `replace` over an ISO-8859-1 commit lost the
+author's bytes and the header. Lead's decision for 0.4.4: refuse before
+anything moves. `encoding.refuseNonUtf8` reads every object the run
+would rewrite or re-sign in one `cat-file --batch`: all commits and
+annotated tags for `replace`/`add-file`, the candidates of
+`resign-tags`, the range and its tags for `resign-commits`, the tags
+for `apply`, and HEAD for `tail` without `--tag` (its subject is
+reused). It refuses one with bytes that are not valid UTF-8, or an
+`encoding` header other than UTF-8, with a usage error (exit 2) naming
+the object, before the bundle, in a dry run too. A CRLF message is
+UTF-8 and goes through. Byte-preserving support (raw buffers end to
+end, the header kept) is a later item.
+
+**Replace refs off (Scout's re-attack N2; AC-96).** git reads
+`refs/replace/*` by default, so `git replace <commit> <clean>` hid a
+commit with a secret from `scan`, while a push of the branch still sent
+it. `replace` and `tail` likewise rewrote the stand-in, not the real
+commit. Lead's decision: every ght git call runs with
+`GIT_NO_REPLACE_OBJECTS=1`, so every tool sees what push sends. `git.run`
+sets it after it strips the caller's environment; the variable is in
+`--local-env-vars`, so a value set earlier is stripped again. `main`
+sets it in `process.env` too, for what runs under a tool (gpg, a
+`--hook`). The mutation check: without `git.run`'s line, AC-96 fails.
+
+**A NUL in the tag message (Scout's re-attack N4; AC-97).** `tail
+--tag --message-file=<f>` with a NUL byte in `<f>` crashed with a stack
+trace after the backup bundle was written: git cannot take a NUL in a
+message. It is now a usage error up front, next to the empty-message
+check, in a dry run too: exit 2, no bundle.
+
+**The caller's identity passes (Lead's allowlist; AC-81).** Stripping
+the whole GIT_CONFIG_COUNT family (N2 above) broke the release route:
+nanojira's `tools/release.ts` and the team's cut-release script pass the
+owner's `user.name`, `user.email` and `user.signingkey` as one-off
+GIT_CONFIG_COUNT entries, and `git-release-squash` then lost them. Lead's
+decision: after the strip, `main` puts back the caller's COUNT entries
+whose key is exactly `user.name`, `user.email` or `user.signingkey`
+(any case, as git matches keys), in their order, renumbered from 0.
+Every other key is dropped, `gpg.*`, `core.*`, `include.*` and
+`filter.*` among them, and GIT_CONFIG_PARAMETERS stays fully stripped,
+so identity goes through the COUNT family only. Identity is not code and
+cannot redirect the target; everything else can, so nothing else passes.
+git-sign appends its own pins after the identity entries. Its identity
+comes from the policy through `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, and its
+key through `-c`, both of which beat a COUNT entry, so the policy still
+wins (AC-81 checks git-sign commit). The signature time does not depend
+on a caller's `gpg.program`: ght's signer computes it (key creation +
+60 s) and hands it to gpg as `--faked-system-time` through its own `-c
+gpg.program=<wrapper>`, which a COUNT entry cannot beat, and a caller
+`gpg.program` is dropped anyway. The wrapper runs the repo's or global
+`gpg.program`, at repo-config trust, as N3 above says. Mutation-tested:
+letting every key through, matching keys case-sensitively, or putting
+nothing back each fails AC-81.
+
+**A signing key is not an option (Scout; Lead's item 7; AC-98).**
+`keyCreationTime` passed the key to `gpg --list-keys --with-colons` as
+the last argument, with no `--`. A repo's `user.signingkey` of
+`--options=<file>` made gpg load `<file>`, and an `agent-program` line
+in it ran a program (confirmed against gpg 2.4.8). git-sign was safe,
+its policy key being 16 to 40 hex digits; the fallback of `replace`,
+`apply` and `tail` to the repo's key was not, and the identity
+allowlist above lets the caller's environment set that key too. Two
+guards now. `createSigner` refuses a key that starts with `-` as a
+usage error (exit 2), before any gpg runs and before anything is
+written. `keyCreationTime` puts `--` before the key, so gpg reads
+`--options=<file>` as a key name and runs nothing. The `-bsau <key>`
+signing call gets no `--`: `u` takes the next argument as its value, so
+`-bsau -- <key>` would sign with the key `--`. gpg already reads the
+key after `-u` as a name (`skipped "--options=…": No secret key`), and
+the first guard covers that call anyway. Mutation-tested: without the
+refusal or without the `--`, AC-98 fails.
+
+## D22: leak-scan misses common secret shapes (v0.4.5, ImprovementScout's survey § 10)
+
+`git-leak-scan` gates what goes public, and a miss is silent. Its
+`secret` pattern was `\b(?:token|secret|key|password)=[A-Za-z0-9_-]{20,}`
+plus a PEM header, and missed the most common shapes:
+
+- `\b` cannot match after `_`, so `API_KEY=…` and `GITHUB_TOKEN=…`;
+- `password: …`, JSON `"password": "…"`, and spaces around `=`;
+- values with `+` or `/` (base64), and dotted ones;
+- `-----BEGIN PGP PRIVATE KEY BLOCK-----`;
+- token prefixes (AWS `AKIA…`, GitHub `ghp_…`, Slack `xoxb-…`, JWTs,
+  `Bearer …`).
+
+**The name.** It must end in one of the four words, either whole or
+after `_`, `.` or `-`, and must not follow a letter or digit. So
+`API_KEY`, `x-api-key` and `db.password` match, and `monkey=` does not,
+as before.
+
+**False positives.** Allowing `:` and spaces would turn ordinary code and
+config into hits: `token = generate_authentication_token()`,
+`primary_key: user_account_identifier_column`. A random secret of 20 or
+more characters almost always has a digit; an identifier almost never
+does. So any form other than the old compact `name=value` needs a digit
+in its value. `ghp_` and `Bearer` need one too, which keeps placeholders
+(`ghp_XXXX…`) and prose (`Bearer authentication-scheme-…`) quiet. The
+compact form keeps its old rule, so no existing hit disappears. Every
+new shape has a near miss in AC-87, and AC-87 is mutation-tested: each
+rule's removal fails it.
+
+**One hit per secret.** `GITHUB_TOKEN=ghp_…` matches both the key=value
+form and the GitHub prefix. A hit wholly inside a longer one is dropped,
+so one `--allow` line covers it.
+
+**Compatibility.** Existing repositories may get new hits, and some old
+hits now extend further, e.g. over a `+` or `/` that used to end them.
+An `--allow` file absorbs either; CHANGES says so.
+`git-history-rewrite`'s "rule sources clean" check uses the same
+categories, so a replacement text that is itself a secret is now
+caught in these shapes too.
+
+**Local paths name a user (AC-88).** The point of `local-path` is a home
+directory, which gives away a user name. So it now also covers `/root/`,
+`c:\users\` in any case (Windows paths are case-insensitive), and
+`~<name>/`. A bare `~/` is left out, by Lead's decision: it names no
+one, and it is in ordinary docs everywhere. At 5cfa6f3, `git grep '~/'`
+finds it in 6 files of ght itself and in at least 10 of nanojira's, so
+flagging it would make every scan noisy. `/root/` must not follow a
+letter, digit, `.`, `-` or `~`, so `/srv/root/…` and a URL's `…/root/…`
+are not hits. `~<name>` must not follow such a character or `/`, so
+`a~b/` and Markdown's `~~old/` are not hits either. The lowercase
+`/users/` of a URL path stays out: only `C:\Users\` is
+case-insensitive.
+
+**Each blob scanned once (AC-89).** `scan` read every commit's whole
+tree blob by blob and held all of it in memory before scanning, so a
+file unchanged over N commits was read and scanned N times. The hits
+are now cached by blob sha. Reading is lazy, so only the cache stays in
+memory. `<count>` is unchanged: it still counts (commit, path) pairs,
+from the cached hits.
+
+Revised after review (Reviewer R1, AC-92): three patterns had an
+unbounded repeat that can run along a line: RE_EMAIL's local part and
+RE_HOSTNAME's labels (both older than D22) and RE_SECRET_KV's name
+prefix (new in D22). On a long line that is one run of such characters,
+every start position read the rest of the run and then failed, which is
+quadratic. Measured on c9a43f9 at 64 KB, one line, `scanBuiltins` alone:
+`ab.ab.…` 74365 ms, `a_a_…` 46645 ms, hex 21631 ms. 1 MB is about 256
+times that, and a minified bundle or a lockfile line is that long. The
+repeats are bounded now: local part 1-64 and domain 1-253 (RFC 5321),
+a label 1-63 (RFC 1035) with up to 16 labels before the suffix and 16
+after, and up to 8 name parts of 1-64 characters before
+`token|secret|key|password`. A longer run still gives a hit, only it
+starts later. With the bounds, 1 MB of each shape takes 62 to 721 ms.
+
+Revised after review (Reviewer R2, AC-93): the filter that drops a
+secret hit inside a longer one compared every pair of hits. For 40000
+`API_KEY=` lines in one blob the regexes took 21 ms and the whole scan
+12425 ms (Reviewer's numbers). It is now one sort by start, longest
+first, and one sweep: a hit is inside a longer one exactly when an
+earlier start reaches its end, or one with the same start ends later.
+20000 random span sets give the same result as the pairwise filter, two
+identical spans included (both kept, as before). The report also ran
+`rev-parse --short` once per output line, 40000 git processes for that
+blob; it is once per commit now.
+
+Revised after review (Reviewer R3, AC-94), coverage by Lead's
+decisions:
+
+- camelCase names. A name had to end in the word whole or after `_`,
+  `.` or `-`, so `authToken`, `dbPassword` and `awsSecretAccessKey` were
+  missed. A second pattern takes `Token`, `Secret`, `Password`,
+  `ApiKey`, `AccessKey` and `PrivateKey`, case-sensitive, right after a
+  lowercase letter or digit, with the same value and digit rules. Not a
+  bare `Key`: `sortKey` and `cacheKey` would flood every scan.
+- `apikey` written flat, in any case, is a fifth word.
+- Prefixes: `github_pat_`, `sk_live_` and `rk_live_`, `AIza`, `glpat-`.
+  Their placeholder rule is two of lowercase, uppercase and digit after
+  the prefix, not the digit rule. The digit rule would miss about 3 % of
+  real 20-character GitLab tokens ((54/64)^20) and 1.5 % of 24-character
+  Stripe keys. Only placeholders (`glpat-xxxx…`, `your-token-goes-here`)
+  fail the mixed rule. ght's own fixtures in AC-94 show both sides.
+
+Each new shape has a near miss in AC-94, and every rule is
+mutation-tested: dropping it, making the camel pattern
+case-insensitive, adding a bare `Key`, or swapping the prefix rule for
+the digit rule or none each fails AC-94.
+
+What the digit rule costs, in both directions:
+
+- It misses passphrases and human-chosen passwords in the `:` or spaced
+  form (`password: correct horse battery staple`), and some random
+  ones: a random base62 value has no digit about 3 % of the time at 20
+  characters and 0.36 % at 32 (Reviewer's figures, (52/62)^n).
+- It makes ids, dates and versions under a `*_key` name hit
+  (`cache_key: user_1234567890_profile`); an `--allow` line absorbs
+  each.
+- Names that do not end in one of the words stay out (`secret_key_base`,
+  `private_key_id`). That is a known gap, not an oversight.
