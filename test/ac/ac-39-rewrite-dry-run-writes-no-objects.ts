@@ -1,4 +1,4 @@
-/* AC-39 -- § 0 (D2, commit a4e8b9f): `history-rewrite`'s dry runs write
+/* AC-39 -- § 0 (D2, commit a4e8b9f): `git-history-rewrite`'s dry runs write
  * no git objects either -- `.git/objects` must be byte-identical before
  * and after a dry-run `replace`/`add-file` (no --apply), even though
  * `--hook` (when given) is still invoked during a dry run's own tree
@@ -10,11 +10,11 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 function assertNoObjectsWritten(label: string, repo: string, gpg: H.Gpg, args: string[]): void {
   const before = H.objectStoreSnapshot(repo, gpg);
-  const r = H.runBin('history-rewrite', args, { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', args, { gnupgHome: gpg.gnupgHome });
   const after = H.objectStoreSnapshot(repo, gpg);
   T.exit(label + ': exit 0', r, 0);
   if (r.missing) return;

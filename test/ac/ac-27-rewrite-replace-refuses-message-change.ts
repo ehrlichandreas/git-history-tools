@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 const gpg = H.setupGpg('ac27');
 if (gpg) {
@@ -19,14 +19,14 @@ if (gpg) {
   const rulesFile = path.join(H.freshDir("ac27-rules"), "ac27-rules.txt");
   fs.writeFileSync(rulesFile, 'jdoe@internal.example\tREDACTED\n');
 
-  const dry = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
+  const dry = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-27 replace (dry run) refuses before even reporting a plan -- the message-would-change check runs up front', dry, 1);
   if (!dry.missing) {
     T.contains('AC-27: refusal names the commit and the reason', dry.stderr,
       'commit ' + short + ' message would change -- replace only rewrites file contents');
   }
 
-  const applied = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-27 replace --apply refuses too, repo left fully unchanged', applied, 1);
   if (!applied.missing) {
     const refsAfter = H.gitRaw(repo, gpg, ['show-ref']);

@@ -1,5 +1,5 @@
 /* AC-05 -- § 0: a merge commit reachable from HEAD is refused by every
- * release-squash subcommand (plan, apply, tail) and every history-rewrite
+ * git-release-squash subcommand (plan, apply, tail) and every git-history-rewrite
  * subcommand, naming the first merge commit found in topo-order. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,8 +7,8 @@ import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
-H.requireBin('history-rewrite');
+H.requireBin('git-release-squash');
+H.requireBin('git-history-rewrite');
 
 function buildMergeRepo(label: string) {
   const gpg = H.setupGpg(label);
@@ -31,7 +31,7 @@ const fx = buildMergeRepo('ac05');
 if (fx) {
   const { repo, gpg, mergeSha } = fx;
 
-  const plan = H.runBin('release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
+  const plan = H.runBin('git-release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-05 plan refuses a merge commit', plan, 1);
   if (!plan.missing) {
     T.contains('AC-05 plan: refusal names "merge commits are not supported"', plan.stderr, 'merge commits are not supported');
@@ -39,18 +39,18 @@ if (fx) {
     T.eq('AC-05 plan: nothing on stdout on a refusal', plan.stdout, '');
   }
 
-  const apply = H.runBin('release-squash', ['apply', repo, '--map', path.join(H.freshDir("ac05-map-unused"), "ac05-map-unused.txt")], { gnupgHome: gpg.gnupgHome });
+  const apply = H.runBin('git-release-squash', ['apply', repo, '--map', path.join(H.freshDir("ac05-map-unused"), "ac05-map-unused.txt")], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-05 apply refuses a merge commit', apply, 1);
   if (!apply.missing) T.contains('AC-05 apply: same refusal reason', apply.stderr, 'merge commits are not supported');
 
-  const tail = H.runBin('release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
+  const tail = H.runBin('git-release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-05 tail refuses a merge commit', tail, 1);
   if (!tail.missing) T.contains('AC-05 tail: same refusal reason', tail.stderr, 'merge commits are not supported');
 
   const rulesFile = path.join(H.freshDir("ac05-rules-unused"), "ac05-rules-unused.txt");
   fs.writeFileSync(rulesFile, 'from\tto\n');
-  const replace = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
-  T.exit('AC-05 history-rewrite replace refuses a merge commit', replace, 1);
+  const replace = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
+  T.exit('AC-05 git-history-rewrite replace refuses a merge commit', replace, 1);
   if (!replace.missing) T.contains('AC-05 replace: same refusal reason', replace.stderr, 'merge commits are not supported');
 }
 

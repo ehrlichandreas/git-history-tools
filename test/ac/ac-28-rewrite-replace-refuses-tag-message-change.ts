@@ -5,7 +5,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 const gpg = H.setupGpg('ac28');
 if (gpg) {
@@ -16,7 +16,7 @@ if (gpg) {
   const rulesFile = path.join(H.freshDir("ac28-rules"), "ac28-rules.txt");
   fs.writeFileSync(rulesFile, 'jdoe@internal.example\tREDACTED\n');
 
-  const r = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-28 replace refuses when a tag message would change', r, 1);
   if (!r.missing) T.contains('AC-28: refusal names the tag and the reason',
     r.stderr, 'tag v1 message would change -- replace only rewrites file contents');

@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac10');
 if (gpg) {
@@ -18,7 +18,7 @@ if (gpg) {
 
   const map = path.join(H.freshDir("ac10-map"), "ac10-map.txt");
   try { fs.unlinkSync(map); } catch (e) {}
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-10 apply --apply: exit 0', r, 0);
   if (!r.missing) {
     T.check('AC-10: the map file was written', fs.existsSync(map), map);

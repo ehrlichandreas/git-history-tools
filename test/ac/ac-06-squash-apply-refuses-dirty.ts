@@ -5,7 +5,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac06');
 if (gpg) {
@@ -19,10 +19,10 @@ if (gpg) {
   fs.writeFileSync(path.join(repo, 'a.txt'), 'dirty uncommitted change\n');
   const map = path.join(H.freshDir("ac06-map"), "ac06-map.txt");
 
-  const dry = H.runBin('release-squash', ['apply', repo, '--map', map], { gnupgHome: gpg.gnupgHome });
+  const dry = H.runBin('git-release-squash', ['apply', repo, '--map', map], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-06 apply dry run (no --apply): tolerates a dirty tree, exit 0', dry, 0);
 
-  const applied = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-06 apply --apply: refuses the dirty tree', applied, 1);
   if (!applied.missing) {
     T.contains('AC-06: refusal names "working tree is dirty"', applied.stderr, 'working tree is dirty');

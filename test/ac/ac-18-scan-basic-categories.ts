@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('leak-scan');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac18');
 if (gpg) {
@@ -22,7 +22,7 @@ if (gpg) {
   });
   const short = H.shortSha(repo, gpg, c1.sha!);
 
-  const r = H.runBin('leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-18 scan: hits found, exit 1', r, 1);
   if (!r.missing) {
     const want = [
@@ -47,7 +47,7 @@ if (gpg2) {
    * fixture's own throwaway identity. */
   const allowFile = path.join(H.freshDir("ac18b-allow"), "ac18b-allow.txt");
   fs.writeFileSync(allowFile, H.FIXTURE_EMAIL + '\n');
-  const clean = H.runBin('leak-scan', ['scan', repo2, '--allow', allowFile], { gnupgHome: gpg2.gnupgHome });
+  const clean = H.runBin('git-leak-scan', ['scan', repo2, '--allow', allowFile], { gnupgHome: gpg2.gnupgHome });
   T.exit('AC-18b scan on a clean repo: exit 0', clean, 0);
   if (!clean.missing) T.eq('AC-18b: no output on a clean scan', clean.stdout.trim(), '');
 }

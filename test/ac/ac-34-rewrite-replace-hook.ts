@@ -8,7 +8,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 function writeHook(p: string, body: string): void {
   fs.writeFileSync(p, '#!/bin/sh\n' + body + '\n');
@@ -29,7 +29,7 @@ if (gpg) {
   const hookPath = path.join(H.freshDir("ac34-hook-noop"), "ac34-hook-noop.sh");
   writeHook(hookPath, 'echo "$1 $GHT_REPO" >> ' + hookLog + '\nexit 0');
 
-  const r = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile, '--hook', hookPath, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile, '--hook', hookPath, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-34 replace --apply --hook (noop hook): exit 0', r, 0);
   if (!r.missing) {
     const calls = fs.existsSync(hookLog) ? fs.readFileSync(hookLog, 'utf8').trim().split('\n').filter(Boolean) : [];
@@ -54,7 +54,7 @@ if (gpg2) {
    * hook's own printed sha is what ends up as the commit's tree. */
   writeHook(overrideTreeHook, 'echo 4b825dc642cb6eb9a060e54bf8d69288fbee4904');
 
-  const r2 = H.runBin('history-rewrite', ['replace', repo2, '--rules', rulesFile2, '--hook', overrideTreeHook, '--apply'], { gnupgHome: gpg2.gnupgHome });
+  const r2 = H.runBin('git-history-rewrite', ['replace', repo2, '--rules', rulesFile2, '--hook', overrideTreeHook, '--apply'], { gnupgHome: gpg2.gnupgHome });
   T.exit('AC-34b replace --apply --hook (overriding hook): exit 0', r2, 0);
   if (!r2.missing) {
     const headSha = H.revParse(repo2, gpg2, 'HEAD');
@@ -66,7 +66,7 @@ if (gpg2) {
   writeHook(failingHook, 'echo "bad output not a sha"\nexit 3');
   const repo3dir = H.initRepo('ac34c', gpg2);
   H.commit(repo3dir, gpg2, 'one', { 'a.txt': 'jdoe@internal.example\n' });
-  const r3 = H.runBin('history-rewrite', ['replace', repo3dir, '--rules', rulesFile2, '--hook', failingHook, '--apply'], { gnupgHome: gpg2.gnupgHome });
+  const r3 = H.runBin('git-history-rewrite', ['replace', repo3dir, '--rules', rulesFile2, '--hook', failingHook, '--apply'], { gnupgHome: gpg2.gnupgHome });
   T.exit('AC-34c: a failing/misbehaving hook is a refusal, repo left unchanged', r3, 1);
   if (!r3.missing) T.contains('AC-34c: refusal names the hook', r3.stderr, failingHook);
 }

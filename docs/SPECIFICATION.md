@@ -1,4 +1,4 @@
-# Specification — git-history-tools v0.2
+# Specification — git-history-tools v0.3
 
 This is the precise CLI contract. docs/DECISIONS.md D1 is the scope and shape;
 this document pins the exact arguments, output lines, exit codes and refusals
@@ -8,13 +8,13 @@ implementation that disagrees is wrong, not the test.
 
 ## 0. Conventions
 
-- Layout: `SKILL.md`, `bin/release-squash`, `bin/leak-scan`, `bin/history-rewrite`
+- Layout: `SKILL.md`, `bin/git-release-squash`, `bin/git-leak-scan`, `bin/git-history-rewrite`
   (POSIX `sh` wrappers, `exec node "$(dirname "$0")/../lib/<name>.ts" "$@"`),
   `lib/*.ts`. Node.js ≥ 24, no runtime dependencies (D1).
 - Every tool is invoked as `<bin> <subcommand> [args...]`. An unknown
   subcommand, a missing required argument, or an unknown flag is a **usage
   error**: exit 2, one line on stderr, `<bin-basename>: <reason>` (e.g.
-  `release-squash: unknown subcommand 'plna'`), nothing on stdout.
+  `git-release-squash: unknown subcommand 'plna'`), nothing on stdout.
 - A **refusal** (a precondition the repo itself fails, not a CLI mistake) is
   exit 1, one line on stderr in the same `<bin-basename>: <reason>` form,
   nothing on stdout, and the repo is left byte-for-byte unchanged — no ref
@@ -26,7 +26,7 @@ implementation that disagrees is wrong, not the test.
   repository to operate on (never the current directory implicitly). A
   `<repo>` that is not a git repository (no `.git`) is a refusal, not a
   usage error: `<bin>: not a git repository (<repo>)`.
-- **(decision)** `--name=<name>` is accepted by `release-squash plan`,
+- **(decision)** `--name=<name>` is accepted by `git-release-squash plan`,
   `apply` and `tail`; it feeds the `<name>` in the default subject template
   `<name> <tag>: <title>`. When omitted, `<name>` defaults to the
   basename of `<repo>` with any trailing `.git` stripped.
@@ -36,12 +36,12 @@ implementation that disagrees is wrong, not the test.
   lightweight tag, the pointed-to commit's own subject line. A tag with
   neither (an annotated tag with an empty message) uses the literal text
   `(no title)`.
-- **(decision)** Every writing subcommand (`release-squash apply`,
-  `release-squash tail`, `history-rewrite replace`, `history-rewrite
+- **(decision)** Every writing subcommand (`git-release-squash apply`,
+  `git-release-squash tail`, `git-history-rewrite replace`, `git-history-rewrite
   add-file`) is a dry run unless `--apply` is given (D1's shared rule,
   applied uniformly): without `--apply` it prints exactly the same report
   it would with `--apply`, changes no ref, creates no bundle, and exits 0.
-  `release-squash plan` has no writing mode at all; giving it `--apply` is
+  `git-release-squash plan` has no writing mode at all; giving it `--apply` is
   a usage error (exit 2).
 - **(D2)** A dry run writes no git objects either, not just no ref: every
   hash a dry run's report needs (a would-be commit's sha, a would-be
@@ -49,21 +49,21 @@ implementation that disagrees is wrong, not the test.
   without writing) and a would-be tree is built with
   `git mktree --missing`, never `git write-tree` against a real index. A
   dry run leaves `.git/objects` byte-identical to before it ran, for
-  every subcommand including `history-rewrite` (whose `--hook`, § 3.1, is
+  every subcommand including `git-history-rewrite` (whose `--hook`, § 3.1, is
   still invoked during a dry run's tree computation -- the hook itself may
   write objects, but the dry run's OWN rule-rewriting and preview work
   never does).
-- **(decision)** `--dates=anon|keep` is accepted by `release-squash apply`
+- **(decision)** `--dates=anon|keep` is accepted by `git-release-squash apply`
   and `tail` (not by `plan`, which never writes and so never assigns
   dates); default `anon`. An unrecognised value is a usage error.
 - A repository with **any merge commit** reachable from HEAD is refused by
-  every `release-squash` subcommand (`plan`, `apply`, `tail`) and by every
-  `history-rewrite` subcommand: `<bin>: merge commits are not supported
+  every `git-release-squash` subcommand (`plan`, `apply`, `tail`) and by every
+  `git-history-rewrite` subcommand: `<bin>: merge commits are not supported
   (<short-sha>)`, naming the first merge commit found in `git log --topo-order`
-  order. `leak-scan scan` has no such restriction (reading history never
+  order. `git-leak-scan scan` has no such restriction (reading history never
   needs a linear one).
 
-## 1. release-squash (`bin/release-squash`)
+## 1. git-release-squash (`bin/git-release-squash`)
 
 ### 1.1 `plan <repo> [--name=<name>]`
 
@@ -92,7 +92,7 @@ for the same tag), not a value a caller can expect to see again once
 `<N>` counts every commit reachable from `<tag>`'s commit that is not
 reachable from the previous tag in the sequence (the first tag's `<N>`
 counts from the root). The second line is always `OK` for an unmodified
-repository — `plan` computes the same squash-commit tree release-squash
+repository — `plan` computes the same squash-commit tree git-release-squash
 `apply` would write and compares it to the tag's own commit tree; the two
 are equal by construction for any repo `plan` can walk, since the squash is
 a reduction of commits whose net tree is, by definition, the tagged
@@ -118,20 +118,20 @@ commit(s) from the start of history are not covered by plan`).
 
 Refuses if HEAD is not itself on a tag (every commit through HEAD must
 already belong to some tag; an untagged tail is what `tail` is for):
-`release-squash: HEAD is not tagged -- run 'tail' first`. Refuses on a merge
+`git-release-squash: HEAD is not tagged -- run 'tail' first`. Refuses on a merge
 commit, and (only when `--apply` is given — the writing form) on a dirty
-working tree: `release-squash: working tree is dirty`. A dry run (no
+working tree: `git-release-squash: working tree is dirty`. A dry run (no
 `--apply`) tolerates a dirty tree, exactly like `plan`.
 
 Without `--apply`: prints the same two-line-per-tag report `plan` prints
-(identical format), then one line `release-squash: dry run, no ref changed
+(identical format), then one line `git-release-squash: dry run, no ref changed
 (use --apply to write)`, exits 0, writes nothing — no map file either,
 even though `--map` was given (a dry run never writes *any* file).
 
 With `--apply`:
 1. Creates the backup bundle (§ 4.1) before changing anything.
 2. Rewrites `refs/heads/<branch>` (whichever branch HEAD is on; a detached
-   HEAD is a refusal, `release-squash: HEAD is detached`) so that history
+   HEAD is a refusal, `git-release-squash: HEAD is detached`) so that history
    becomes exactly one commit per tag, oldest first, each parented on the
    previous squash commit (the first has no parent). Each new commit's
    tree is the original tag commit's own tree, byte-identical. Subject is
@@ -156,7 +156,7 @@ Squashes only the commits reachable from HEAD that are not reachable from
 any tag (the untagged tail) into exactly one new commit, parented on the
 last tag's commit (or parentless, if there are no tags at all). Refuses if
 there is no untagged tail (HEAD is itself already tagged):
-`release-squash: HEAD is already tagged, nothing to squash`. Refuses on a merge
+`git-release-squash: HEAD is already tagged, nothing to squash`. Refuses on a merge
 commit and, when `--apply` is given, on a dirty tree (same as `apply`).
 Unlike `apply`, `tail` does **not** require any existing tag (a brand-new
 repo with zero tags and an untagged HEAD squashes its whole history into
@@ -165,7 +165,7 @@ is a separate, manual step outside this tool's scope (D1 only names
 `plan`/`apply`/`tail`, no `tag` subcommand).
 
 Without `--apply`: prints `tail: squashes <N> commit(s) (<oldest-short>..
-<head-short>) into "<subject>"` then `release-squash: dry run, no ref changed
+<head-short>) into "<subject>"` then `git-release-squash: dry run, no ref changed
 (use --apply to write)`, exits 0, writes nothing.
 
 With `--apply`: creates the backup bundle, rewrites the branch HEAD is on
@@ -204,12 +204,12 @@ defeating the anonymisation `--dates=anon` exists for):
   creation time + 60s via `--faked-system-time`), regardless of `--dates`.
 - Refuses, before writing anything (dry run or `--apply` alike, same as
   the "HEAD is not tagged"/"already tagged" preconditions elsewhere), if
-  `<tag>` already exists: `release-squash: tag <tag> already exists`.
+  `<tag>` already exists: `git-release-squash: tag <tag> already exists`.
 - Without `--apply`, the usual dry-run report and line are printed and
   nothing is written, same as the untagged form; the planned tag name and
   title appear in the report line in place of `(untagged)`.
 
-## 2. leak-scan (`bin/leak-scan`)
+## 2. git-leak-scan (`bin/git-leak-scan`)
 
 ### 2.1 `scan <repo> [--terms <file>] [--allow <file>]`
 
@@ -270,7 +270,7 @@ usage error (bad flag, `--terms`/`--allow` file does not exist). Refuses
 path inside `<repo>` (§ 4.4) — printed before any hit, as the sole output
 line.
 
-## 3. history-rewrite (`bin/history-rewrite`)
+## 3. git-history-rewrite (`bin/git-history-rewrite`)
 
 ### 3.1 `replace <repo> --rules <file> [--hook <script>] [--apply]`
 
@@ -292,7 +292,7 @@ and reapplied after all rules run).
 
 Refuses (before writing anything) if applying every rule, in order, to any
 commit's message, or to any annotated tag's message, would change that
-message's text: `history-rewrite: commit <short-sha> message would change --
+message's text: `git-history-rewrite: commit <short-sha> message would change --
 replace only rewrites file contents` (or `tag <tag>` for a tag message).
 This is checked for every commit/tag up front, before any blob is
 rewritten, so the refusal is exit 1 with the repo fully unchanged, not a
@@ -310,7 +310,7 @@ naming the hook and its exit status/output, repo left unchanged.
 
 Without `--apply`: prints one line per commit that would change,
 `replace: <short-sha> would change`, then a summary line `replace: N of M
-commits would change`, then `history-rewrite: dry run, no ref changed (use
+commits would change`, then `git-history-rewrite: dry run, no ref changed (use
 --apply to write)`; exits 0; writes nothing (including: the hook, if
 given, is still invoked during the dry run's tree computation, since
 knowing which commits "would change" requires computing the would-be
@@ -320,9 +320,9 @@ With `--apply`: creates the backup bundle, rewrites every ref (branches
 and tags) to point at the rewritten history; tag names, messages, and
 types are kept; an annotated tag is re-signed, dated at its own (kept, not
 anonymised — § 0 lists dates as untouched by `replace`/`add-file`, only
-`release-squash` anonymises) original tagger date. Runs verification
+`git-release-squash` anonymises) original tagger date. Runs verification
 (§ 4.2) with the replace-specific fourth check (§ 4.5); prints its report;
-exits 0/1 the same way `release-squash apply` does.
+exits 0/1 the same way `git-release-squash apply` does.
 
 ### 3.2 `add-file <repo> <path> [--as <repo-path>] [--apply]`
 
@@ -369,11 +369,11 @@ verify), in this order, each printed as `verify: <check>: OK` or `verify:
    — nothing else changed.
 2. `signatures` — every commit and annotated tag reachable from any ref
    has a signature `git verify-commit`/`git verify-tag` accepts.
-3. `squash: every commit tagged` — (release-squash `apply` only; skipped,
+3. `squash: every commit tagged` — (git-release-squash `apply` only; skipped,
    not printed, for `tail`/`replace`/`add-file`) every commit reachable
    from HEAD has at least one tag pointing at it.
-4. `replace: rule sources clean` — (history-rewrite `replace` only;
-   skipped for `add-file`/release-squash) a leak-scan (§ 2.1, built-in
+4. `replace: rule sources clean` — (git-history-rewrite `replace` only;
+   skipped for `add-file`/git-release-squash) a git-leak-scan (§ 2.1, built-in
    categories only, no `--terms`/`--allow`) of the **values on the right-
    hand side of `--rules`** (the chosen replacement text, one synthetic
    "blob" per rule, not the left-hand `from` text, and not the file's own
@@ -390,9 +390,9 @@ already-published nanojira history's own `@<i*86400+43200> +0000`
 convention). An annotated tag's tagger date is the same instant as the
 commit it now points to. `--dates=keep`: every date (author, committer,
 tagger) is copied byte-for-byte from the original commit/tag.
-`history-rewrite` never anonymises dates regardless of flags (§ 3.1): the
-`--dates` flag belongs to `release-squash` only; giving it to
-`history-rewrite` is a usage error.
+`git-history-rewrite` never anonymises dates regardless of flags (§ 3.1): the
+`--dates` flag belongs to `git-release-squash` only; giving it to
+`git-history-rewrite` is a usage error.
 
 `tail` keeps every EXISTING commit's date unchanged (it only squashes the
 untagged tail into one new commit — § 1.3's own dating already follows
@@ -461,7 +461,7 @@ written before the implementation.
 | AC-30 | ac-30-rewrite-add-file-existing.ts | `add-file`: replaces an existing blob at the target path in some commits |
 | AC-31 | ac-31-rewrite-dry-run-no-refs-changed.ts | `replace`/`add-file` without `--apply` changes no ref |
 | AC-32 | ac-32-rewrite-apply-creates-backup-bundle.ts | `replace --apply` creates the backup bundle |
-| AC-33 | ac-33-rewrite-verification-rule-sources-clean.ts | post-rewrite "rule sources clean" leak-scan check |
+| AC-33 | ac-33-rewrite-verification-rule-sources-clean.ts | post-rewrite "rule sources clean" git-leak-scan check |
 | AC-34 | ac-34-rewrite-replace-hook.ts | `--hook`: receives the tree sha, its printed sha overrides the tree |
 | AC-35 | ac-35-squash-tail-continues-dates.ts | `apply` then `tail` later equals one `apply`/`tail` run: same tree, dates and subjects, commit by commit |
 | AC-36 | ac-36-squash-tail-tag-release.ts | `tail --tag --message`: subject/tag/tagger-date/signature, usage errors, refuses an existing tag |

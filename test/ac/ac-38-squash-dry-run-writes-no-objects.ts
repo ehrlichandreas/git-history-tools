@@ -6,11 +6,11 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 function assertNoObjectsWritten(label: string, repo: string, gpg: H.Gpg, args: string[]): void {
   const before = H.objectStoreSnapshot(repo, gpg);
-  const r = H.runBin('release-squash', args, { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', args, { gnupgHome: gpg.gnupgHome });
   const after = H.objectStoreSnapshot(repo, gpg);
   T.exit(label + ': exit 0', r, 0);
   if (r.missing) return;

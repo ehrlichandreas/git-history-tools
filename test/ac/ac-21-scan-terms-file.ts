@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('leak-scan');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac21');
 if (gpg) {
@@ -24,10 +24,10 @@ if (gpg) {
   const allowFile = path.join(H.freshDir("ac21-allow"), "ac21-allow.txt");
   fs.writeFileSync(allowFile, H.FIXTURE_EMAIL + '\n');
 
-  const withoutTerms = H.runBin('leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
+  const withoutTerms = H.runBin('git-leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-21: without --terms, the plain project-name string is not flagged by the built-ins, exit 0', withoutTerms, 0);
 
-  const withTerms = H.runBin('leak-scan', ['scan', repo, '--terms', termsFile, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
+  const withTerms = H.runBin('git-leak-scan', ['scan', repo, '--terms', termsFile, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-21: with --terms, the same scan now finds the term, exit 1', withTerms, 1);
   if (!withTerms.missing) {
     T.contains('AC-21: hit is reported under category "term", case-insensitively matched',

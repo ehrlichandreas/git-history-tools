@@ -4,7 +4,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('leak-scan');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac19');
 if (gpg) {
@@ -12,7 +12,7 @@ if (gpg) {
   H.commit(repo, gpg, 'ordinary clean commit message', { 'a.txt': 'nothing sensitive\n' });
   H.tagSigned(repo, gpg, 'v1', 'release notes mention jdoe@internal.example by mistake');
 
-  const r = H.runBin('leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-19 scan: the tag-message-only leak is still found, exit 1', r, 1);
   if (!r.missing) {
     T.contains('AC-19: hit reported with path "(tag-message)"',

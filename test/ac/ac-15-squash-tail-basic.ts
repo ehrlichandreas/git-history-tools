@@ -4,7 +4,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac15');
 if (gpg) {
@@ -20,14 +20,14 @@ if (gpg) {
   const headBefore = H.revParse(repo, gpg, 'HEAD');
   const v1RefBefore = H.revParse(repo, gpg, 'v1');
 
-  const dry = H.runBin('release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
+  const dry = H.runBin('git-release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-15 tail (dry run): exit 0', dry, 0);
   if (!dry.missing) {
     T.contains('AC-15 dry run: reports folding 2 commits', dry.stdout, 'tail: squashes 2 commit(s)');
-    T.contains('AC-15 dry run: dry-run line present', dry.stdout, 'release-squash: dry run, no ref changed (use --apply to write)');
+    T.contains('AC-15 dry run: dry-run line present', dry.stdout, 'git-release-squash: dry run, no ref changed (use --apply to write)');
   }
 
-  const applied = H.runBin('release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-15 tail --apply: exit 0', applied, 0);
   if (!applied.missing) {
     const headSha = H.revParse(repo, gpg, 'HEAD');

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* release-squash (docs/SPECIFICATION.md § 1): plan / apply / tail. */
+/* git-release-squash (docs/SPECIFICATION.md § 1): plan / apply / tail. */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -260,7 +260,7 @@ function cmdApply(bin: string, args: string[]): void {
         }
       }
     }
-    git.text(repo, ['update-ref', '-m', 'release-squash apply', 'refs/heads/' + branch, newHead, oldHead], { env });
+    git.text(repo, ['update-ref', '-m', 'git-release-squash apply', 'refs/heads/' + branch, newHead, oldHead], { env });
 
     const results = [
       verify.verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree }))),
@@ -351,7 +351,7 @@ function cmdTail(bin: string, args: string[]): void {
     });
     const newTree = git.text(repo, ['rev-parse', nc + '^{tree}'], { env });
 
-    git.text(repo, ['update-ref', '-m', 'release-squash tail', 'refs/heads/' + branch, nc, headSha], { env });
+    git.text(repo, ['update-ref', '-m', 'git-release-squash tail', 'refs/heads/' + branch, nc, headSha], { env });
 
     if (flags.tag !== undefined) {
       const tmp = writeTmpMsg(tagMessageText as string);
@@ -372,7 +372,7 @@ function cmdTail(bin: string, args: string[]): void {
   }
 }
 
-main('release-squash', (bin) => {
+main('git-release-squash', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
   if (sub === 'plan') return cmdPlan(bin, rest);

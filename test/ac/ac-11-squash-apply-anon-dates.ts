@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 function identLine(repo: string, gpg: H.Gpg, rev: string, field: string): string | null {
   const raw = H.catFile(repo, gpg, rev, '-p');
@@ -25,7 +25,7 @@ if (gpg) {
   H.tagSigned(repo, gpg, 'v2', 'release v2');
 
   const map = path.join(H.freshDir("ac11-map"), "ac11-map.txt");
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-11 apply --apply (default --dates=anon): exit 0', r, 0);
   if (!r.missing) {
     /* v1/v2 are annotated tags -- rev-parse'ing the bare name resolves to

@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac02');
 if (gpg) {
@@ -17,7 +17,7 @@ if (gpg) {
   H.tagSigned(repo, gpg, 'v1.0', 'first release name');
   H.tagSigned(repo, gpg, 'v1.0.1', 'same tree, second tag name');
 
-  const r = H.runBin('release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-02 plan: exit 0', r, 0);
   if (!r.missing) {
     T.contains('AC-02: v1.0 reported', r.stdout, 'plan: v1.0 folds');
@@ -40,7 +40,7 @@ if (gpg) {
   }
 
   const map = path.join(H.freshDir("ac02-map"), "ac02-map.txt");
-  const applied = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-02 apply --apply: exit 0', applied, 0);
   if (!applied.missing) {
     const sha1 = H.revParse(repo, gpg, 'v1.0^{commit}');

@@ -1,6 +1,6 @@
-/* AC-32 -- § 4.1 applied to history-rewrite: `replace --apply` creates
+/* AC-32 -- § 4.1 applied to git-history-rewrite: `replace --apply` creates
  * the backup bundle before touching any ref, same mechanics as
- * release-squash's own (AC-09) -- including the same order requirement:
+ * git-release-squash's own (AC-09) -- including the same order requirement:
  * the bundle must carry the PRE-rewrite branch tip and tag, not the
  * rewritten ones a bundle taken too late would show instead. */
 import fs from 'node:fs';
@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 const gpg = H.setupGpg('ac32');
 if (gpg) {
@@ -24,7 +24,7 @@ if (gpg) {
   const rulesFile = path.join(H.freshDir("ac32-rules"), "ac32-rules.txt");
   fs.writeFileSync(rulesFile, 'jdoe@internal.example\tREDACTED\n');
 
-  const r = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-32 replace --apply: exit 0', r, 0);
   if (!r.missing) {
     const base = path.basename(repo);

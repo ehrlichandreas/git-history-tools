@@ -7,8 +7,8 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
-H.requireBin('leak-scan');
+H.requireBin('git-history-rewrite');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac29');
 if (gpg) {
@@ -17,7 +17,7 @@ if (gpg) {
 
   const rulesInside = path.join(repo, 'rules.txt');
   fs.writeFileSync(rulesInside, 'from\tto\n');
-  const replace = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesInside], { gnupgHome: gpg.gnupgHome });
+  const replace = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesInside], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-29 replace: refuses a --rules path inside the repo', replace, 1);
   if (!replace.missing) {
     T.contains('AC-29 replace: refusal names --rules and the path', replace.stderr, '--rules points inside the repo');
@@ -26,13 +26,13 @@ if (gpg) {
 
   const termsInside = path.join(repo, 'terms.txt');
   fs.writeFileSync(termsInside, 'whatever\n');
-  const scanTerms = H.runBin('leak-scan', ['scan', repo, '--terms', termsInside], { gnupgHome: gpg.gnupgHome });
+  const scanTerms = H.runBin('git-leak-scan', ['scan', repo, '--terms', termsInside], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-29 scan: refuses a --terms path inside the repo', scanTerms, 1);
   if (!scanTerms.missing) T.contains('AC-29 scan: refusal names --terms', scanTerms.stderr, '--terms points inside the repo');
 
   const allowInside = path.join(repo, 'allow.txt');
   fs.writeFileSync(allowInside, 'whatever\n');
-  const scanAllow = H.runBin('leak-scan', ['scan', repo, '--allow', allowInside], { gnupgHome: gpg.gnupgHome });
+  const scanAllow = H.runBin('git-leak-scan', ['scan', repo, '--allow', allowInside], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-29 scan: refuses a --allow path inside the repo', scanAllow, 1);
   if (!scanAllow.missing) T.contains('AC-29 scan: refusal names --allow', scanAllow.stderr, '--allow points inside the repo');
 
@@ -43,7 +43,7 @@ if (gpg) {
   const linkPath = path.join(repo, 'rules-link.txt');
   try { fs.symlinkSync(outsideRules, linkPath); } catch (e) { /* unsupported fs, skip */ }
   if (fs.existsSync(linkPath)) {
-    const viaLink = H.runBin('history-rewrite', ['replace', repo, '--rules', linkPath], { gnupgHome: gpg.gnupgHome });
+    const viaLink = H.runBin('git-history-rewrite', ['replace', repo, '--rules', linkPath], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-29: a symlink living inside the repo is refused even if its target is outside', viaLink, 1);
   }
 }

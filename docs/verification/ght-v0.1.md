@@ -19,10 +19,10 @@ numbered spec clause, plus the three `bin/*` wrappers and SKILL.md.
   detached-HEAD, and rules/terms/allow-inside-repo refusals all match
   the spec's exact message shape and fire before any write (confirmed
   live and by mutation, §3 below).
-- **Dry-run default**: `release-squash apply`/`tail` compute their report
+- **Dry-run default**: `git-release-squash apply`/`tail` compute their report
   without calling `commit-tree` at all when `--apply` is absent (the
   early-return happens before any git write call) — a true no-op.
-  `history-rewrite replace`/`add-file` are different: `runRewrite()`
+  `git-history-rewrite replace`/`add-file` are different: `runRewrite()`
   unconditionally computes `records` (via `transformTree`) **before**
   branching on `--apply`, and `transformTree` calls `git hash-object -w`
   / `git mktree` to get real shas for the "would change" report. This

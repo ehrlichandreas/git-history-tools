@@ -11,7 +11,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 interface Row {
   tree: string;
@@ -41,7 +41,7 @@ function buildAndRun(label: string, gpg: H.Gpg): { repo: string; rows: Row[] } |
    * built repos this file compares) so the subject text is comparable
    * across both. */
   const map = path.join(H.freshDir(label + '-map'), label + '-map.txt');
-  const applied = H.runBin('release-squash', ['apply', repo, '--map', map, '--name=ac35', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--name=ac35', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(label + ': apply --apply (release 1): exit 0', applied, 0);
 
   /* These two commits are added only AFTER apply already ran and wrote
@@ -51,7 +51,7 @@ function buildAndRun(label: string, gpg: H.Gpg): { repo: string; rows: Row[] } |
   H.commit(repo, gpg, 'tail 1', { 'a.txt': 'two\n' }, { date: '2020-02-01T10:00:00 +0000' });
   H.commit(repo, gpg, 'tail 2 subject', { 'a.txt': 'three\n' }, { date: '2020-03-01T10:00:00 +0000' });
 
-  const tailed = H.runBin('release-squash', ['tail', repo, '--name=ac35', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const tailed = H.runBin('git-release-squash', ['tail', repo, '--name=ac35', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(label + ': tail --apply (continuing): exit 0', tailed, 0);
   if (applied.missing || tailed.missing) return null;
 

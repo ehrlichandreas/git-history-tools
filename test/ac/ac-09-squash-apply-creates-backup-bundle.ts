@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac09');
 if (gpg) {
@@ -25,7 +25,7 @@ if (gpg) {
   const v1Before = H.revParse(repo, gpg, 'v1');
 
   const map = path.join(H.freshDir("ac09-map"), "ac09-map.txt");
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-09 apply --apply: exit 0 on a clean single-tag repo', r, 0);
   if (!r.missing) {
     const base = path.basename(repo);

@@ -1,5 +1,5 @@
-/* § 2.1: the built-in leak categories, shared between `leak-scan scan` and
- * history-rewrite's own "rule sources clean" verification check. Pure text
+/* § 2.1: the built-in leak categories, shared between `git-leak-scan scan` and
+ * git-history-rewrite's own "rule sources clean" verification check. Pure text
  * functions -- no git, no filesystem -- so they are equally usable against a
  * real blob's content or a synthetic one-line "blob" made of a rule's own
  * replacement text. */
@@ -87,7 +87,7 @@ export function readLines(filePath: string, lowercase: boolean): string[] {
   return out;
 }
 
-/** Binary-blob convention shared with history-rewrite (§ 2.1 / § 3.1): a
+/** Binary-blob convention shared with git-history-rewrite (§ 2.1 / § 3.1): a
  * NUL byte within the first 8000 bytes makes a blob "binary". */
 export function isBinary(buf: Buffer): boolean {
   const n = Math.min(buf.length, 8000);
