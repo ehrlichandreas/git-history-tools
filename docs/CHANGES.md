@@ -3,6 +3,28 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.3
+
+No change to the four tools: `git-release-squash`, `git-leak-scan`,
+`git-history-rewrite` and `git-sign` behave exactly as in 0.4.2. This
+release changes only the test suite, which runs from a clone
+(`npm test` / `node test/run-all.ts`):
+
+- A test file still running at the per-file timeout (120 s) is now a
+  FAIL, whatever it exits with later, and its report says it timed out.
+  The pool sends SIGTERM, then SIGKILL after 10 s; a file run serially
+  (`--jobs=1`, or marked `@serial`) gets SIGKILL at once. A file that
+  ignores SIGTERM can no longer keep the run waiting; AC-68 checks this.
+- A test that dies before it finishes (an uncaught exception, an
+  unhandled rejection, a bare `process.exit()`) still removes its fixture
+  directories. The harness installs no signal handler, so it never holds
+  off run-all's kill; AC-67 checks this.
+- `@slow` marks follow a fixed rule (`docs/DECISIONS.md` D19): a file's
+  time over the pool mean, the median of three pooled runs, is marked at
+  4.0 or more and unmarked below 3.0. ac-40, ac-53 and ac-60 are marked,
+  so they start first; in the measured runs the median pooled wall went
+  from 45.3 s to 41.1 s.
+
 ## 0.4.2
 
 No change to the four tools: `git-release-squash`, `git-leak-scan`,

@@ -1,3 +1,4 @@
+/* @slow: 4.1x the pool mean (D19) */
 /* AC-60 -- docs/SPECIFICATION.md § 5.0/5.1: forbidden-window boundaries
  * (07:00 inclusive, 19:00 exclusive), weekday-only windows (Saturday is
  * never forbidden under a mon-fri policy, any hour), and Europe/Berlin

@@ -540,10 +540,24 @@ function sweepBackupBundles(): void {
   }
 }
 
+let _cleaned = false;
 function cleanup(): void {
-  if (process.env.GHT_KEEP === '1') return;
+  if (_cleaned || process.env.GHT_KEEP === '1') return;
+  _cleaned = true;
   sweepBackupBundles();
   for (const d of _tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* best effort */ }
   }
 }
+
+/* A test that dies before T.finish() -- an uncaught exception, an unhandled
+ * rejection, a bare process.exit() -- still removes its fixtures (AC-67):
+ * node fires 'exit' in all three. finish()'s own call stays; the guard
+ * makes the second call a no-op. There is deliberately NO SIGTERM/SIGINT/
+ * SIGHUP handler: a JS signal listener only runs once the event loop is
+ * free, so a test busy in synchronous work (spawnSync, a sync loop) would
+ * hold run-all's timeout SIGTERM until that work ended, reach T.finish()
+ * and exit 0. With no listener the signal ends the process at once (AC-67);
+ * what a killed test made stays inside run-all's run root, which the leak
+ * sweep reports and removes. Same rule as nanojira's harness (its TSK-028). */
+process.on('exit', cleanup);

@@ -1150,3 +1150,59 @@ proof, on v0.4.1's 65 files:
   slowest file took 29.8 s of its 120 s, the slowest `bin/*` call 5.0 s
   of 30 s, ac-40's slowest child 9.0 s of 60 s, key generation 0.3 s of
   30 s and `--list-secret-keys` 0.2 s of 15 s.
+
+**`@slow` follows a fixed rule (v0.4.3).** Fixed in writing before it
+was measured, like nanojira's (its DECISIONS 209), but with ght's own
+threshold:
+- **Ratio:** a file's ratio is its time over the mean of the pool files
+  of the same pooled run (`--jobs=8`), `(ms / mean).toFixed(1)`.
+- **Value:** the median of three runs, because single runs scatter
+  across the threshold (ac-60: 3.7–4.2 in v0.4.1's eleven rounds).
+- **Thresholds:** a median of 4.0 or more is marked; below 3.0 is
+  unmarked; 3.0–3.9 keeps its current state.
+- **Why 4.0, not nanojira's 5.0:**
+  - The pool cannot finish before about sum / jobs. That is about 8 ×
+    the mean here (66 files, 8 jobs), and about 15 × in nanojira.
+  - Files are dispatched in name order, so a file late in the alphabet
+    starts at about half that floor. If it takes 4 × the mean, it ends
+    after the floor and so sets the wall.
+  - This is what ac-60 did: dispatched at 26–30 s, it ran 19–22 s and
+    finished last.
+
+**The measurement:** three unmarked pooled runs of v0.4.2's 66 files
+(start load 7.0–9.8):
+- ac-40: 5.8, 5.5, 5.5, median 5.5, so marked.
+- ac-53: 5.0, 4.6, 4.6, median 4.6, so marked.
+- ac-60: 4.1, 4.1, 4.2, median 4.1, so marked.
+- ac-51: 4.0, 3.7, 3.7, median 3.7, so it stays unmarked.
+- Every other file was below 3.0.
+
+**The result:** three marked runs right after, in the same slot
+(start load 9.1–10.2):
+- Wall 41.5, 41.1 and 40.3 s, against 51.2, 45.3 and 44.5 s unmarked.
+  The medians are 41.1 s against 45.3 s.
+- Pool sums were alike (296–350 s unmarked, 300–308 s marked). The
+  marked wall sits about 3 s above sum / 8, where the unmarked one was
+  about 7 s above it.
+- All runs were 66/66 with nothing left in the run root.
+
+**Revised (v0.4.3): a timed-out file is a FAIL and cannot outlast the
+timeout (AC-67, AC-68).** The pool paragraph above keeps `spawnSync`'s
+contract on the timeout: SIGTERM and a null status. That left two gaps.
+A file that held SIGTERM through synchronous work could still exit 0
+after the timeout and pass, because a JS signal listener only runs once
+the event loop is free. A file that ignored SIGTERM was never killed,
+and the run waited for it. Now:
+- A file still running at the 120 s timeout is a FAIL, whatever it
+  exits with later. Its report ends with `run-all: timed out after
+  120 s; killed (...)`.
+- The pool sends SIGTERM, then SIGKILL after a 10 s grace
+  (`KILL_GRACE_MS`). The serial path kills with SIGKILL at once, since
+  `spawnSync` cannot escalate. Both still give a null status.
+- The harness cleans up on node's `exit` event, so a test that dies
+  before `T.finish()` (an uncaught exception, an unhandled rejection, a
+  bare `process.exit()`) still removes its fixtures. It installs no
+  signal handler, so it never holds a kill itself. What a killed file
+  made stays in the run root, which the leak sweep reports and removes.
+- This is the same rule as nanojira's harness and runner (its DECISIONS
+  193, revised for its TSK-028).

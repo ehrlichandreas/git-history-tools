@@ -76,27 +76,46 @@ const env = Object.assign({}, process.env, { TMPDIR: runRoot, GHT_TEST_ROOT: run
 if (binDir) env.GHT_BIN_DIR = binDir;
 
 const TIMEOUT_MS = 120000;
+/* A file still running TIMEOUT_MS after it started is a FAIL, whatever it
+ * exits with later (AC-68): the pool sends SIGTERM, then SIGKILL after
+ * KILL_GRACE_MS; the serial path (spawnSync, which cannot escalate) kills
+ * with SIGKILL at once. The harness installs no signal handler, so for a
+ * harness file both end it at once anyway. */
+const KILL_GRACE_MS = 10000;
+const timedOutNote = (how: string) => 'run-all: timed out after ' + (TIMEOUT_MS / 1000) + ' s; killed (' + how + ')';
 const MAX_BUFFER = 1024 * 1024;   // spawnSync's default, which the serial loop has always used
 
-interface Result { status: number | null; out: string }
+interface Result { status: number | null; out: string; timedOut?: string }
 
 function runSync(f: string): Result {
-  const r = spawnSync(process.execPath, [path.join(AC_DIR, f)], { encoding: 'utf8', env, timeout: TIMEOUT_MS });
-  return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  const r = spawnSync(process.execPath, [path.join(AC_DIR, f)], { encoding: 'utf8', env, timeout: TIMEOUT_MS, killSignal: 'SIGKILL' });
+  const out = (r.stdout || '') + (r.stderr || '');
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return { status: null, out, timedOut: timedOutNote('SIGKILL') };
+  return { status: r.status, out };
 }
 
 /* The async twin of runSync(), kept to spawnSync's observable contract so a
  * file's verdict cannot depend on which phase ran it: stdin closed at once,
- * stdout then stderr (not interleaved), SIGTERM and a null status on the
- * timeout or once either stream passes MAX_BUFFER, and a spawn error is an
- * empty-output null status. */
+ * stdout then stderr (not interleaved), a null status once either stream
+ * passes MAX_BUFFER, and a spawn error is an empty-output null status. On
+ * the timeout both give a null status and a timed-out note; runSync kills
+ * with SIGKILL, this one with SIGTERM, then SIGKILL after KILL_GRACE_MS.
+ * Parked (as in nanojira): it resolves on 'close', so a grandchild that
+ * inherited the file's stdout/stderr would keep the pipes open, and the run
+ * waiting, even after the file itself is killed. No test spawns one today;
+ * a process-group kill would cover it. */
 function runAsync(f: string): Promise<Result> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(AC_DIR, f)], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     const out: Buffer[] = [], err: Buffer[] = [];
-    let outLen = 0, errLen = 0, done = false;
-    const kill = () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } };
-    const timer = setTimeout(kill, TIMEOUT_MS);
+    let outLen = 0, errLen = 0, done = false, timedOut = false;
+    let grace: NodeJS.Timeout | undefined;
+    const kill = (sig: NodeJS.Signals = 'SIGTERM') => { try { child.kill(sig); } catch { /* already gone */ } };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill('SIGTERM');
+      grace = setTimeout(() => kill('SIGKILL'), KILL_GRACE_MS);
+    }, TIMEOUT_MS);
     child.stdin.on('error', () => { /* child exited before reading stdin */ });
     child.stdin.end();
     child.stdout.on('data', (b: Buffer) => { outLen += b.length; if (outLen > MAX_BUFFER) kill(); else out.push(b); });
@@ -105,7 +124,8 @@ function runAsync(f: string): Promise<Result> {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ status, out: text });
+      if (grace) clearTimeout(grace);
+      resolve(timedOut ? { status: null, out: text, timedOut: timedOutNote('SIGTERM, then SIGKILL after ' + (KILL_GRACE_MS / 1000) + ' s') } : { status, out: text });
     };
     child.on('error', () => finish(null, ''));
     child.on('close', (code, signal) => {
@@ -133,6 +153,7 @@ function report(f: string, r: Result): void {
   }
   const lines = out.trim().split('\n');
   for (const l of lines) if (l.startsWith('  ')) console.log(l);
+  if (r.timedOut) console.log('  ' + r.timedOut);
 }
 
 /* GHT_TEST_TIMES=<file>: write each file's wall time there (TSV, slowest

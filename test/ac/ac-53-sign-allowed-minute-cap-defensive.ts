@@ -1,3 +1,4 @@
+/* @slow: 4.6x the pool mean (D19) */
 /* AC-53 -- D14 (LOW, reviewer-found): `nextAllowedMinuteAfter` and the
  * private `firstAllowedMinuteAtOrAfter` walked forward at most 20160
  * minutes (14 days) looking for an allowed instant, then returned

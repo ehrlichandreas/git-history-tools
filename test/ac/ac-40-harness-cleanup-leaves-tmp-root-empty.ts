@@ -1,3 +1,4 @@
+/* @slow: 5.5x the pool mean (D19) */
 /* AC-40 -- test hygiene (D2, commit a4e8b9f; GHT-7): the harness's own
  * cleanup removes every kind of entry a test's fixtures could leave
  * behind under the tmp root, not just the fixture repo dirs themselves --
