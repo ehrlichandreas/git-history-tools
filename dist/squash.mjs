@@ -130,12 +130,21 @@ function createSigner(repo, env, opts) {
   const created = keyCreationTime(gpgProgram, signingKey, env);
   const signTime = opts && opts.signTime !== void 0 ? opts.signTime : created + 60;
   const dir = fs2.mkdtempSync(path2.join(os.tmpdir(), "ght-signer-"));
-  const wrapperPath = path2.join(dir, "gpg-wrapper.sh");
-  fs2.writeFileSync(
-    wrapperPath,
-    "#!/bin/sh\nexec " + shQuote(gpgProgram) + " --faked-system-time " + signTime + '! "$@"\n'
-  );
-  fs2.chmodSync(wrapperPath, 493);
+  let wrapperPath;
+  try {
+    wrapperPath = path2.join(dir, "gpg-wrapper.sh");
+    fs2.writeFileSync(
+      wrapperPath,
+      "#!/bin/sh\nexec " + shQuote(gpgProgram) + " --faked-system-time " + signTime + '! "$@"\n'
+    );
+    fs2.chmodSync(wrapperPath, 493);
+  } catch (e) {
+    try {
+      fs2.rmSync(dir, { recursive: true, force: true });
+    } catch (e2) {
+    }
+    throw e;
+  }
   const gitConfig = ["-c", "gpg.program=" + wrapperPath];
   if (explicitKey) gitConfig.push("-c", "user.signingkey=" + explicitKey);
   return {
@@ -317,14 +326,22 @@ function tagRawMessage(repo, env, name) {
 }
 function writeTmpMsg(msg) {
   const dir = fs3.mkdtempSync(path4.join(os2.tmpdir(), "ght-tagmsg-"));
-  const p = path4.join(dir, "msg.txt");
-  fs3.writeFileSync(p, msg);
-  return { path: p, cleanup() {
+  try {
+    const p = path4.join(dir, "msg.txt");
+    fs3.writeFileSync(p, msg);
+    return { path: p, cleanup() {
+      try {
+        fs3.rmSync(dir, { recursive: true, force: true });
+      } catch (e) {
+      }
+    } };
+  } catch (e) {
     try {
       fs3.rmSync(dir, { recursive: true, force: true });
-    } catch (e) {
+    } catch (e2) {
     }
-  } };
+    throw e;
+  }
 }
 function currentBranch(repo, env) {
   const r = run(repo, ["symbolic-ref", "--short", "HEAD"], { env });

@@ -42,7 +42,9 @@ sh bin/git-release-squash tail ../my-repo --name=my-repo --tag=v1.0 --message="f
 Usage details are in [SKILL.md](SKILL.md) and the full contract is in
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md); what changed in each release
 is in [docs/CHANGES.md](docs/CHANGES.md). Run the tests with
-`node test/run-all.ts`.
+`node test/run-all.ts`. Their fixtures go under `/tmp`, or under
+`GHT_TEST_ROOT=<dir>` if set; `GHT_KEEP=1` keeps them, and the run's own
+root directory, for inspection.
 
 **v0.2.0** renamed the `ght-squash`/`ght-scan`/`ght-rewrite` commands to
 `release-squash`/`leak-scan`/`history-rewrite`, and **v0.3.0** prefixed them

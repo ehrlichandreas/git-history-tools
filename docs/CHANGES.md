@@ -3,6 +3,16 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.1
+
+- Fix: no temporary directory is left behind when writing a temporary
+  file fails right after the directory was made (a full disk, a failed
+  `chmod`): the gpg signing wrapper of `git-release-squash`,
+  `git-history-rewrite` and `git-sign`, and the message file of every
+  signed commit and tag. `git-sign commit`/`tag` no longer leak the
+  signing wrapper's directory when writing the message file fails. The
+  error itself is reported as before.
+
 ## 0.4.0
 
 Additive: a fourth tool, `git-sign`. The three existing tools keep their

@@ -37,7 +37,7 @@ if (gpg) {
       const m = /^.+\.backup-(\d{8}T\d{6}Z)\.bundle$/.exec(entries[0]);
       T.check('AC-09: the UTC stamp matches YYYYMMDDTHHMMSSZ', !!m, entries[0]);
       const bundlePath = path.join(dir, entries[0]);
-      const verify = spawnSync('git', ['bundle', 'verify', bundlePath], { encoding: 'utf8' });
+      const verify = spawnSync('git', ['bundle', 'verify', bundlePath], { encoding: 'utf8', cwd: repo });
       T.check('AC-09: git bundle verify accepts the bundle', verify.status === 0, verify.stderr);
 
       const heads = H.bundleListHeads(bundlePath);

@@ -106,9 +106,14 @@ function rawIdentity(repo: string, env: Env, sha: string): Identity {
 
 function writeTmpMsg(msg: string): TmpMsg {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-tagmsg-'));
-  const p = path.join(dir, 'msg.txt');
-  fs.writeFileSync(p, msg);
-  return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } } };
+  try {
+    const p = path.join(dir, 'msg.txt');
+    fs.writeFileSync(p, msg);
+    return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } } };
+  } catch (e) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* best effort */ }
+    throw e;
+  }
 }
 
 /* -------------------------------------------------------- tree rewriting --- */

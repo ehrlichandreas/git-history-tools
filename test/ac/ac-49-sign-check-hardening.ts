@@ -22,7 +22,6 @@
  *    keeps the window rule unchanged.
  */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
@@ -35,7 +34,7 @@ H.requireBin('git-sign');
  * exactly how a real leaked signature time arises (the commit claims one
  * date, gpg stamps the signature with whenever it actually ran). */
 function fakeTimeWrapper(fakeEpoch: number): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-faketime-'));
+  const dir = H.freshDir('faketime');
   const p = path.join(dir, 'gpg-wrapper.sh');
   fs.writeFileSync(p, '#!/bin/sh\nexec gpg --faked-system-time ' + fakeEpoch + '! "$@"\n');
   fs.chmodSync(p, 0o755);
@@ -49,7 +48,7 @@ function fakeTimeWrapper(fakeEpoch: number): string {
  * time happens to be unreadable", the two independent facts `check` must
  * track separately. */
 function noPacketsWrapper(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-nopackets-'));
+  const dir = H.freshDir('nopackets');
   const p = path.join(dir, 'gpg-wrapper.sh');
   fs.writeFileSync(p,
     '#!/bin/sh\n' +

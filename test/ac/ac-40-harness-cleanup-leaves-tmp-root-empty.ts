@@ -31,6 +31,10 @@ const REPRESENTATIVE = [
 ];
 
 const freshRoot = fs.mkdtempSync(path.join(H.TMP_ROOT, 'ght-ac40-fresh-'));
+/* GHT_KEEP=1 in this file's own environment must not reach the children:
+ * their cleanup is exactly what is under test here. */
+const childEnv: NodeJS.ProcessEnv = Object.assign({}, process.env, { GHT_TEST_ROOT: freshRoot, TMPDIR: freshRoot });
+delete childEnv.GHT_KEEP;
 try {
   for (const f of REPRESENTATIVE) {
     const p = path.join(AC_DIR, f);
@@ -39,7 +43,7 @@ try {
     const r = spawnSync(process.execPath, [p], {
       encoding: 'utf8',
       timeout: 60000,
-      env: Object.assign({}, process.env, { GHT_TEST_ROOT: freshRoot }),
+      env: childEnv,
     });
     const out = (r.stdout || '') + (r.stderr || '');
     T.check('AC-40: ' + f + ' ran to completion under the fresh root (not a crash)',

@@ -60,9 +60,14 @@ function splitIdent(s: string): { name: string; email: string } {
 
 function writeTmpMsg(msg: string): TmpMsg {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-signmsg-'));
-  const p = path.join(dir, 'msg.txt');
-  fs.writeFileSync(p, msg);
-  return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ } } };
+  try {
+    const p = path.join(dir, 'msg.txt');
+    fs.writeFileSync(p, msg);
+    return { path: p, cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ } } };
+  } catch (e) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* best effort */ }
+    throw e;
+  }
 }
 
 /** The policy, the gpg binary it names (`gpgProgram`, else `gpg` from
@@ -216,8 +221,9 @@ function cmdCommit(bin: string, args: string[]): void {
   }
 
   const signer = createSigner(repo, env, { signingKey: policy.signingKey, signTime, gpgProgram });
-  const tmp = writeTmpMsg(message);
+  let tmp: TmpMsg | undefined;
   try {
+    tmp = writeTmpMsg(message);
     const dateStr = gitDateAt(chosenEpoch, policy.timezone);
     /* --amend otherwise silently keeps the ORIGINAL commit's author name/
      * email/date, ignoring GIT_AUTHOR_* env vars entirely for that one
@@ -241,7 +247,7 @@ function cmdCommit(bin: string, args: string[]): void {
     process.stdout.write('sign: commit ' + sha + '\n');
   } finally {
     signer.cleanup();
-    tmp.cleanup();
+    if (tmp) tmp.cleanup();
   }
 }
 
@@ -282,8 +288,9 @@ function cmdTag(bin: string, args: string[]): void {
   }
 
   const signer = createSigner(repo, env, { signingKey: policy.signingKey, signTime, gpgProgram });
-  const tmp = writeTmpMsg(message);
+  let tmp: TmpMsg | undefined;
   try {
+    tmp = writeTmpMsg(message);
     const dateStr = gitDateAt(chosenEpoch, policy.timezone);
     const r = git.run(repo, ['tag', '-s', '-F', tmp.path, tagName, target], {
       env: Object.assign({}, env, {
@@ -296,7 +303,7 @@ function cmdTag(bin: string, args: string[]): void {
     process.stdout.write('sign: tag ' + tagName + '\n');
   } finally {
     signer.cleanup();
-    tmp.cleanup();
+    if (tmp) tmp.cleanup();
   }
 }
 

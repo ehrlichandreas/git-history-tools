@@ -85,11 +85,17 @@ export function createSigner(repo: string, env: NodeJS.ProcessEnv, opts?: Signer
   const signTime = (opts && opts.signTime !== undefined) ? opts.signTime : created + 60;
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ght-signer-'));
-  const wrapperPath = path.join(dir, 'gpg-wrapper.sh');
-  fs.writeFileSync(wrapperPath,
-    '#!/bin/sh\n' +
-    'exec ' + shQuote(gpgProgram) + ' --faked-system-time ' + signTime + '! "$@"\n');
-  fs.chmodSync(wrapperPath, 0o755);
+  let wrapperPath: string;
+  try {
+    wrapperPath = path.join(dir, 'gpg-wrapper.sh');
+    fs.writeFileSync(wrapperPath,
+      '#!/bin/sh\n' +
+      'exec ' + shQuote(gpgProgram) + ' --faked-system-time ' + signTime + '! "$@"\n');
+    fs.chmodSync(wrapperPath, 0o755);
+  } catch (e) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* best effort */ }
+    throw e;
+  }
 
   const gitConfig = ['-c', 'gpg.program=' + wrapperPath];
   if (explicitKey) gitConfig.push('-c', 'user.signingkey=' + explicitKey);

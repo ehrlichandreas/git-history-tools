@@ -33,7 +33,7 @@ if (gpg) {
     T.check('AC-32: exactly one backup bundle created', entries.length === 1, JSON.stringify(fs.readdirSync(dir)));
     if (entries.length === 1) {
       const bundlePath = path.join(dir, entries[0]);
-      const verify = spawnSync('git', ['bundle', 'verify', bundlePath], { encoding: 'utf8' });
+      const verify = spawnSync('git', ['bundle', 'verify', bundlePath], { encoding: 'utf8', cwd: repo });
       T.check('AC-32: the bundle verifies cleanly', verify.status === 0, verify.stderr);
 
       const heads = H.bundleListHeads(bundlePath);

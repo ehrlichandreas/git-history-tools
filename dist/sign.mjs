@@ -140,12 +140,21 @@ function createSigner(repo, env, opts) {
   const created = keyCreationTime(gpgProgram, signingKey, env);
   const signTime = opts && opts.signTime !== void 0 ? opts.signTime : created + 60;
   const dir = fs2.mkdtempSync(path2.join(os.tmpdir(), "ght-signer-"));
-  const wrapperPath = path2.join(dir, "gpg-wrapper.sh");
-  fs2.writeFileSync(
-    wrapperPath,
-    "#!/bin/sh\nexec " + shQuote(gpgProgram) + " --faked-system-time " + signTime + '! "$@"\n'
-  );
-  fs2.chmodSync(wrapperPath, 493);
+  let wrapperPath;
+  try {
+    wrapperPath = path2.join(dir, "gpg-wrapper.sh");
+    fs2.writeFileSync(
+      wrapperPath,
+      "#!/bin/sh\nexec " + shQuote(gpgProgram) + " --faked-system-time " + signTime + '! "$@"\n'
+    );
+    fs2.chmodSync(wrapperPath, 493);
+  } catch (e) {
+    try {
+      fs2.rmSync(dir, { recursive: true, force: true });
+    } catch (e2) {
+    }
+    throw e;
+  }
   const gitConfig = ["-c", "gpg.program=" + wrapperPath];
   if (explicitKey) gitConfig.push("-c", "user.signingkey=" + explicitKey);
   return {
@@ -556,14 +565,22 @@ function splitIdent(s) {
 }
 function writeTmpMsg(msg) {
   const dir = fs4.mkdtempSync(path5.join(os3.tmpdir(), "ght-signmsg-"));
-  const p = path5.join(dir, "msg.txt");
-  fs4.writeFileSync(p, msg);
-  return { path: p, cleanup() {
+  try {
+    const p = path5.join(dir, "msg.txt");
+    fs4.writeFileSync(p, msg);
+    return { path: p, cleanup() {
+      try {
+        fs4.rmSync(dir, { recursive: true, force: true });
+      } catch (e) {
+      }
+    } };
+  } catch (e) {
     try {
       fs4.rmSync(dir, { recursive: true, force: true });
-    } catch (e) {
+    } catch (e2) {
     }
-  } };
+    throw e;
+  }
 }
 function policyContext(repo, flags) {
   const policy = loadPolicy(repo, flags.policy, process.env);
@@ -683,8 +700,9 @@ function cmdCommit(bin, args) {
     return;
   }
   const signer = createSigner(repo, env, { signingKey: policy.signingKey, signTime, gpgProgram });
-  const tmp = writeTmpMsg(message);
+  let tmp;
   try {
+    tmp = writeTmpMsg(message);
     const dateStr = gitDateAt(chosenEpoch, policy.timezone);
     const commitArgs = [
       "commit",
@@ -712,7 +730,7 @@ function cmdCommit(bin, args) {
     process.stdout.write("sign: commit " + sha + "\n");
   } finally {
     signer.cleanup();
-    tmp.cleanup();
+    if (tmp) tmp.cleanup();
   }
 }
 function cmdTag(bin, args) {
@@ -746,8 +764,9 @@ function cmdTag(bin, args) {
     return;
   }
   const signer = createSigner(repo, env, { signingKey: policy.signingKey, signTime, gpgProgram });
-  const tmp = writeTmpMsg(message);
+  let tmp;
   try {
+    tmp = writeTmpMsg(message);
     const dateStr = gitDateAt(chosenEpoch, policy.timezone);
     const r = run(repo, ["tag", "-s", "-F", tmp.path, tagName, target], {
       env: Object.assign({}, env, {
@@ -762,7 +781,7 @@ function cmdTag(bin, args) {
     process.stdout.write("sign: tag " + tagName + "\n");
   } finally {
     signer.cleanup();
-    tmp.cleanup();
+    if (tmp) tmp.cleanup();
   }
 }
 function annotatedTags(repo, env) {
