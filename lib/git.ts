@@ -83,6 +83,16 @@ export function configCountEnv(pairs: [string, string][]): Record<string, string
  * `core.fsmonitor` (under `status`) are code it would run on our behalf. */
 const NO_REPO_CODE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 
+/** ght reads and writes UTF-8 only (D21, D23, AC-106). A repository's
+ * `i18n.commitEncoding` made `commit-tree` and `git commit` stamp
+ * `encoding <it>` over the UTF-8 bytes they were given, and
+ * `i18n.logOutputEncoding` (which defaults to it) made `log --format`
+ * hand over a message re-encoded away from UTF-8. A source commit in
+ * another encoding is refused before any write (encoding.ts), so a new
+ * commit gets no header; an explicit UTF-8 one is dropped (replace) or
+ * refused (resign-commits, AC-107). */
+const UTF8_ONLY = ['-c', 'i18n.commitEncoding=UTF-8', '-c', 'i18n.logOutputEncoding=UTF-8'];
+
 /** Runs git, returns {status, stdout (Buffer), stderr (string)}. Never throws.
  * Whatever `env` holds, CALLER_GIT_ENV never reaches git, except the
  * GIT_CONFIG_COUNT family, which by now can only be the caller's identity
@@ -93,7 +103,7 @@ export function run(repo: string, args: string[], opts?: RunOpts): RunResult {
   const env = Object.assign({}, process.env, o.env || {});
   for (const k of CALLER_GIT_ENV) if (k !== 'GIT_CONFIG_COUNT') delete env[k];
   env.GIT_NO_REPLACE_OBJECTS = '1';
-  const pre = NO_REPO_CODE.concat(o.config || []);
+  const pre = NO_REPO_CODE.concat(UTF8_ONLY, o.config || []);
   const r = spawnSync('git', ['-C', repo].concat(pre, args), {
     env,
     input: o.input,

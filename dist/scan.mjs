@@ -51,12 +51,13 @@ function configCountEnv(pairs) {
   );
 }
 var NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+var UTF8_ONLY = ["-c", "i18n.commitEncoding=UTF-8", "-c", "i18n.logOutputEncoding=UTF-8"];
 function run(repo, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env, o.env || {});
   for (const k of CALLER_GIT_ENV) if (k !== "GIT_CONFIG_COUNT") delete env[k];
   env.GIT_NO_REPLACE_OBJECTS = "1";
-  const pre = NO_REPO_CODE.concat(o.config || []);
+  const pre = NO_REPO_CODE.concat(UTF8_ONLY, o.config || []);
   const r = spawnSync("git", ["-C", repo].concat(pre, args), {
     env,
     input: o.input,
@@ -161,6 +162,29 @@ function resolveOutsideFile(repo, flagName, filePath) {
   }
   return realFileFull;
 }
+function readUserFile(label, file) {
+  try {
+    return fs.readFileSync(file);
+  } catch (e) {
+    const code = e.code;
+    const why = code === "ENOENT" ? "no such file" : code === "EISDIR" ? "is a directory" : code === "EACCES" ? "permission denied" : "cannot read (" + (code || e.message) + ")";
+    throw new UsageError(label + ": " + why + ": " + file);
+  }
+}
+var UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var HELP_WORDS = ["--help", "-h", "help"];
+function printHelp(sub, rest, synopses, footer) {
+  if (sub === void 0) return false;
+  if (HELP_WORDS.includes(sub)) {
+    process.stdout.write("usage:\n" + Object.values(synopses).map((l) => "  " + l + "\n").join("") + footer + "\n");
+    return true;
+  }
+  if (Object.hasOwn(synopses, sub) && (rest.includes("--help") || rest.includes("-h"))) {
+    process.stdout.write("usage: " + synopses[sub] + "\n");
+    return true;
+  }
+  return false;
+}
 function main(bin, fn) {
   const identity = callerIdentityConfig(process.env);
   for (const k of callerGitEnvNames(process.env)) delete process.env[k];
@@ -182,7 +206,6 @@ function main(bin, fn) {
 }
 
 // lib/leakscan.ts
-import { readFileSync } from "node:fs";
 var RE_EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/g;
 var RE_URL = /https?:\/\/[^\s)"'`>\]]+/g;
 var RE_LOCAL_PATH = /\/Users\/[^\s"'`<>]+|\/home\/[^\s"'`<>]+|[Cc]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\s"'`<>]+|(?<![A-Za-z0-9._~-])\/root\/[^\s"'`<>]+|(?<![A-Za-z0-9._\/~-])~[A-Za-z_][A-Za-z0-9_.-]*\/[^\s"'`<>]+/g;
@@ -290,8 +313,7 @@ function scanTerms(text2, terms) {
   }
   return hits;
 }
-function readLines(filePath, lowercase) {
-  const raw = readFileSync(filePath, "utf8");
+function parseLines(raw, lowercase) {
   const out = [];
   for (const line of raw.split("\n")) {
     const l = line.replace(/\r$/, "");
@@ -358,14 +380,15 @@ function cmdScan(bin, args) {
   const { positional, flags } = parseFlags(args, { valueFlags: ["--terms", "--allow"], boolFlags: [] });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
+  if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
   requireRepo(repo);
   const env = process.env;
   let termsPath = null;
   let allowPath = null;
   if (flags.terms !== void 0) termsPath = resolveOutsideFile(repo, "--terms", flags.terms);
   if (flags.allow !== void 0) allowPath = resolveOutsideFile(repo, "--allow", flags.allow);
-  const terms = termsPath ? readLines(termsPath, true) : [];
-  const allow = new Set(allowPath ? readLines(allowPath, false) : []);
+  const terms = termsPath ? parseLines(readUserFile("--terms", termsPath).toString("utf8"), true) : [];
+  const allow = new Set(allowPath ? parseLines(readUserFile("--allow", allowPath).toString("utf8"), false) : []);
   const targets = collectTargets(repo, env);
   const seenPairs = /* @__PURE__ */ new Set();
   const agg = /* @__PURE__ */ new Map();
@@ -419,9 +442,13 @@ function cmdScan(bin, args) {
   process.stdout.write(lines.map((l) => l + "\n").join(""));
   process.exitCode = lines.length > 0 ? 1 : 0;
 }
+var SYNOPSES = {
+  scan: "git-leak-scan scan <repo> [--terms <file>] [--allow <file>]"
+};
 main("git-leak-scan", (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, "Read-only. See docs/SPECIFICATION.md \xA7 2.")) return;
   if (sub === void 0) throw new UsageError("missing subcommand (usage: " + bin + " scan <repo> ...)");
   if (sub === "scan") return cmdScan(bin, rest);
   throw new UsageError("unknown subcommand '" + sub + "'");

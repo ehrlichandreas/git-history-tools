@@ -3,7 +3,7 @@ name: git-history-tools
 description: "Four tools for preparing a git history for publication: git-release-squash folds commits into one per tag, git-leak-scan searches every reachable blob/message/identity for emails/URLs/paths/hostnames/IPs/secrets/custom terms, git-history-rewrite applies literal text replacements or adds a file into every commit, git-sign is a policy-enforcing commit/tag, re-signs existing tags or commit ranges (resign-tags/resign-commits), plus a read-only check gate for identity, signature, forbidden time windows and forbidden message patterns. All four keep commits signed and never push. Use when a repository's history needs to be squashed to tagged releases, checked for leaked information before going public, rewritten to remove sensitive strings, or committed/tagged/audited under an explicit identity-and-signing-key policy."
 license: MIT
 metadata:
-  version: "0.4.4"
+  version: "0.4.5"
 ---
 
 # git-history-tools
@@ -19,7 +19,10 @@ signed, and none of them pushes.
 folder). Needs only Node.js >= 24, no other dependency.
 
 Every writing subcommand is a dry run unless `--apply` is given: it prints the
-same report it would with `--apply`, changes no ref, creates no bundle.
+same report it would with `--apply`, changes no ref, creates no bundle. An
+`--apply` that writes a backup bundle first prints `backup: <path>`, the
+restore point. Every tool prints its synopses with `--help` (also `-h`,
+`help`), `<tool> <sub> --help` just that one.
 
 ### git-release-squash (`bin/git-release-squash`)
 
@@ -66,8 +69,7 @@ all three come from a **policy file** (the gpg binary from its optional
 (`--policy=<file>`, else `$XDG_CONFIG_HOME/git-history-tools/policy.json`,
 else `$HOME/.config/git-history-tools/policy.json`; see
 `docs/policy.example.json`), which must live outside the target repo (same
-rule as `--rules`/`--terms`/`--allow`). `git-sign --help` prints every
-subcommand's synopsis, `git-sign <sub> --help` just that one.
+rule as `--rules`/`--terms`/`--allow`).
 
 - `commit <repo> (--message=<text>|--message-file=<path>) --date=(auto|<date>)
   [--amend] [--policy=<file>] [--apply]` -- commits the staged index with the

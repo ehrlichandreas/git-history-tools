@@ -4,7 +4,8 @@
  * given: `r/self -> .`, committed inside the work tree, put
  * `self.backup-<UTC>.bundle` INSIDE r as an untracked file, and a symlink
  * elsewhere put the bundle next to the link, away from the repository.
- * The bundle is now `<realpath of the top level>.backup-<UTC>.bundle`. */
+ * The bundle is now `<realpath of the top level>.backup-<UTC>.bundle`,
+ * and the `backup: <path>` line (D23) names that real path. */
 import fs from 'node:fs';
 import path from 'node:path';
 import * as H from '../lib/harness.ts';
@@ -36,8 +37,10 @@ for (const label of ['r/self -> . inside the work tree', 'a symlink elsewhere ->
   const l = 'AC-84 [' + label + ']';
   const r = H.runBin('git-history-rewrite', ['replace', given, '--rules', rules, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(l + ': exit 0', r, 0);
-  T.eq(l + ': one bundle next to the real top level, named after it',
-    bundlesIn(path.dirname(repo)).filter((n) => n.startsWith(path.basename(repo) + '.backup-')).length, 1);
+  const mine = bundlesIn(path.dirname(repo)).filter((n) => n.startsWith(path.basename(repo) + '.backup-'));
+  T.eq(l + ': one bundle next to the real top level, named after it', mine.length, 1);
+  T.eq(l + ': the first stdout line names that bundle by its real path (D23)',
+    r.stdout.split('\n')[0], 'backup: ' + path.join(path.dirname(repo), mine[0] || '<none>'));
   T.eq(l + ': no bundle inside the work tree', bundlesIn(repo).join(' '), '');
   T.eq(l + ': no bundle next to the path as given', bundlesIn(path.dirname(given)).filter((n) => n.startsWith('link.') || n.startsWith('self.')).join(' '), '');
   T.eq(l + ': nothing untracked in the work tree', H.gitRaw(repo, gpg, ['status', '--porcelain']).split('\n').filter((x) => x.startsWith('??')).join(' '), '');

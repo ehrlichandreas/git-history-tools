@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main, printHelp, readUserFile, decodeUserText } from './cli.ts';
 import { refuseNonUtf8 } from './encoding.ts';
 import { createSigner, buildSignedTagObject } from './signer.ts';
 import type { Signer } from './signer.ts';
@@ -82,24 +82,83 @@ function groupsFromTags(allCommits: string[], tags: TagEntry[]): { groups: Group
   return { groups, tailCommits: allCommits.slice(prevIdx + 1) };
 }
 
-function titleFor(repo: string, env: Env, tag: TagEntry): string {
-  if (tag.type === 'tag') {
-    const s = git.text(repo, ['for-each-ref', '--format=%(contents:subject)', 'refs/tags/' + tag.name], { env });
-    return s === '' ? '(no title)' : s;
-  }
-  return git.text(repo, ['log', '-1', '--format=%s', tag.commit], { env });
+/** An annotated tag's message as stored, without its signature: never
+ * `%(contents:subject)`, which joins the first paragraph into one line
+ * (D23, AC-104). By full refname, as everywhere (D20, AC-80). */
+function tagMessage(repo: string, env: Env, name: string): string {
+  const fmt = (f: string) => git.run(repo, ['for-each-ref', '--format=' + f, 'refs/tags/' + name], { env });
+  const all = fmt('%(contents)');
+  const sig = fmt('%(contents:signature)');
+  if (all.status !== 0) throw new git.GitError(['for-each-ref', 'refs/tags/' + name], all);
+  if (sig.status !== 0) throw new git.GitError(['for-each-ref', 'refs/tags/' + name], sig);
+  /* for-each-ref ends every record with one newline of its own */
+  const contents = (all.stdout as string).replace(/\n$/, '');
+  const signature = (sig.stdout as string).replace(/\n$/, '');
+  return signature && contents.endsWith(signature) ? contents.slice(0, contents.length - signature.length) : contents;
 }
 
-function renderPlanLines(repo: string, env: Env, name: string):
+/* § 0: an annotated tag's title is the first line of its message, a
+ * lightweight tag's the subject of its commit. */
+function titleFor(repo: string, env: Env, tag: TagEntry): string {
+  return titleLine(tag.type === 'tag' ? tagMessage(repo, env, tag.name) : git.text(repo, ['log', '-1', '--format=%s', tag.commit], { env }));
+}
+
+/** A release subject's title (§ 0, D23): the first line of `text`, every
+ * control character (C0 but tab, DEL, C1) a space, so neither the commit
+ * subject nor plan's line carries a raw CR or an escape, then trailing
+ * spaces and tabs trimmed as git trims a subject (a CRLF message's CR
+ * among them, by then a space). Nothing left is `(no title)`. */
+function titleLine(text: string): string {
+  const t = text.split('\n')[0].replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, ' ').replace(/[ \t]+$/, '');
+  return t === '' ? '(no title)' : t;
+}
+
+/** The full sha of the commit `apply` would write for one group, unsigned
+ * (§ 1.1 `<tag-short>`): the same tree, parent, subject, dates and ident
+ * as `commit-tree`, hashed and never written. With no identity configured,
+ * where `apply` could not commit at all, the ident is `unknown`. Never an
+ * `encoding` header, as `apply` writes none (D23, AC-106). */
+function previewCommit(repo: string, env: Env, tree: string, parent: string | null, subject: string, authorDate: string, committerDate: string): { sha: string; object: string } {
+  const dated = Object.assign({}, env, { GIT_AUTHOR_DATE: authorDate, GIT_COMMITTER_DATE: committerDate });
+  const ident = (v: string, date: string) => {
+    const r = git.run(repo, ['var', v], { env: dated });
+    return r.status === 0 ? (r.stdout as string).replace(/\n$/, '') : 'unknown <unknown> ' + date.replace(/^@/, '');
+  };
+  const object = 'tree ' + tree + '\n' + (parent ? 'parent ' + parent + '\n' : '') +
+    'author ' + ident('GIT_AUTHOR_IDENT', authorDate) + '\n' +
+    'committer ' + ident('GIT_COMMITTER_IDENT', committerDate) + '\n' +
+    '\n' + subject + '\n';
+  return { sha: git.text(repo, ['hash-object', '-t', 'commit', '--stdin'], { env, input: object }), object };
+}
+
+function renderPlanLines(repo: string, env: Env, name: string, dates: string):
   { lines: string[]; groups: Group[]; tailCommits: string[]; allCommits: string[] } {
   const allCommits = revListReverseHead(repo, env);
   const tags = loadTagIndex(repo, env);
   const { groups, tailCommits } = groupsFromTags(allCommits, tags);
   const lines: string[] = [];
   let lastGroupTagName: string | null = null;
+  let parent: string | null = null;
+  let idx = 0;
   for (const g of groups) {
     const groupOldestShort = shortSha(repo, env, g.commits[0]);
     const tipShort = shortSha(repo, env, g.tip);
+    /* The commit apply would write for this group (§ 1.1, § 1.2): one per
+     * tagged commit, the first tag's subject, every tag of the group on it. */
+    const tree = git.text(repo, ['rev-parse', g.tip + '^{tree}'], { env });
+    const subject = name + ' ' + g.tags[0].name + ': ' + titleFor(repo, env, g.tags[0]);
+    const authorDate = dates === 'anon' ? anonDateAt(idx) : rawDateOf(repo, env, g.tip, 'a');
+    const committerDate = dates === 'anon' ? anonDateAt(idx) : rawDateOf(repo, env, g.tip, 'c');
+    const preview = previewCommit(repo, env, tree, parent, subject, authorDate, committerDate);
+    const previewShort = preview.sha.slice(0, tipShort.length);
+    /* Compared, not assumed: the tree the preview records against each
+     * tag's own commit tree (equal by construction for plan, § 1.1).
+     * A mutant that always prints OK here (dropping the comparison
+     * entirely) is unreachable by any test: `plan` never writes anything
+     * to disagree with its own preview, so the FAIL branch is dead code
+     * for `plan` by construction, documented as such in SPECIFICATION.md
+     * § 1.1 rather than pinned. */
+    const previewTree = (/^tree ([0-9a-f]+)$/m.exec(preview.object) || [])[1];
     g.tags.forEach((t, i) => {
       /* Several tags on the same commit: the first (refname order) carries
        * the group's real fold count; every additional co-located tag is
@@ -107,13 +166,14 @@ function renderPlanLines(repo: string, env: Env, name: string):
        * tag is re-counted under the others. */
       const n = i === 0 ? g.commits.length - (g.tags.length - 1) : 1;
       const oldestShort = i === 0 ? groupOldestShort : tipShort;
-      const title = titleFor(repo, env, t);
-      const tagShort = shortSha(repo, env, 'refs/tags/' + t.name);
+      const tagTree = git.text(repo, ['rev-parse', t.commit + '^{tree}'], { env });
       lines.push('plan: ' + t.name + ' folds ' + n + ' commit(s) (' +
-        oldestShort + '..' + tagShort + ') into "' + title + '"');
-      lines.push('plan: ' + t.name + ' tree equals ' + tagShort + '\'s own tree: OK');
+        oldestShort + '..' + previewShort + ') into "' + subject + '"');
+      lines.push('plan: ' + t.name + ' tree equals ' + previewShort + '\'s own tree: ' + (previewTree === tagTree ? 'OK' : 'FAIL'));
     });
     lastGroupTagName = g.tags[0].name;
+    parent = preview.sha;
+    idx++;
   }
   if (tailCommits.length > 0) {
     if (groups.length === 0) {
@@ -137,12 +197,10 @@ function rawDateOf(repo: string, env: Env, rev: string, which: string): string {
   return '@' + raw;
 }
 
-/* By full refname, never the bare name: `git tag -l <name>` reads a valid
- * tag `-x` as an option (D20, AC-80). */
+/* The message a re-created tag keeps: the stored one, its first lines not
+ * joined (D23, AC-104); buildTag's stripspace normalises the rest. */
 function tagRawMessage(repo: string, env: Env, name: string): string {
-  const s = git.text(repo, ['for-each-ref', '--format=%(contents:subject)', 'refs/tags/' + name], { env });
-  const b = git.text(repo, ['for-each-ref', '--format=%(contents:body)', 'refs/tags/' + name], { env }).replace(/\s+$/, '');
-  return s + (b ? '\n\n' + b : '') + '\n';
+  return tagMessage(repo, env, name).replace(/\s+$/, '') + '\n';
 }
 
 /** A new tag's message exactly as `git tag -F` used to store it: its
@@ -189,11 +247,12 @@ function cmdPlan(bin: string, args: string[]): void {
   const { positional, flags } = parseFlags(args, { valueFlags: ['--name'], boolFlags: [] });
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
+  if (positional.length > 1) throw new UsageError('unexpected argument: ' + positional[1]);
   requireRepo(repo);
   const env = process.env;
   refuseOnMerge(repo, env);
   const name = (flags.name as string) || defaultName(repo);
-  const { lines } = renderPlanLines(repo, env, name);
+  const { lines } = renderPlanLines(repo, env, name, 'anon');
   process.stdout.write(lines.map((l) => l + '\n').join(''));
 }
 
@@ -205,6 +264,7 @@ function cmdApply(bin: string, args: string[]): void {
   });
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
+  if (positional.length > 1) throw new UsageError('unexpected argument: ' + positional[1]);
   if (!flags.map) throw new UsageError('missing --map');
   /* The map is written after the backup bundle; a path it cannot be written to is a usage error first (D20, AC-77). */
   const mapPath = path.resolve(flags.map as string);
@@ -228,7 +288,7 @@ function cmdApply(bin: string, args: string[]): void {
   if (!headTagged) throw new Refusal('HEAD is not tagged -- run \'tail\' first');
 
   const name = (flags.name as string) || defaultName(repo);
-  const { lines } = renderPlanLines(repo, env, name);
+  const { lines } = renderPlanLines(repo, env, name, dates);
 
   if (!flags.apply) {
     process.stdout.write(lines.map((l) => l + '\n').join(''));
@@ -307,6 +367,7 @@ function cmdTail(bin: string, args: string[]): void {
   });
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
+  if (positional.length > 1) throw new UsageError('unexpected argument: ' + positional[1]);
   if (flags.map !== undefined) throw new UsageError('tail does not take --map');
   const dates = (flags.dates as string) || 'anon';
   if (dates !== 'anon' && dates !== 'keep') throw new UsageError('--dates must be \'anon\' or \'keep\'');
@@ -324,7 +385,8 @@ function cmdTail(bin: string, args: string[]): void {
     throw new UsageError('--tag: ' + JSON.stringify(flags.tag) + ' is not a valid tag name');
   }
   const tagMessageText: string | null = hasMessage ? (flags.message as string) :
-    (hasMessageFile ? fs.readFileSync(flags['message-file'] as string, 'utf8') : null);
+    (hasMessageFile ? decodeUserText('--message-file', flags['message-file'] as string,
+      readUserFile('--message-file', flags['message-file'] as string)) : null);
 
   requireRepo(repo);
   const env = process.env;
@@ -353,8 +415,8 @@ function cmdTail(bin: string, args: string[]): void {
   }
 
   const name = (flags.name as string) || defaultName(repo);
-  const title = flags.tag !== undefined ? (tagMessageText as string).split('\n')[0] :
-    git.text(repo, ['log', '-1', '--format=%s', headSha], { env });
+  const title = titleLine(flags.tag !== undefined ? tagMessageText as string :
+    git.text(repo, ['log', '-1', '--format=%s', headSha], { env }));
   const subject = flags.tag !== undefined ? name + ' ' + flags.tag + ': ' + title : name + ' (untagged): ' + title;
   const oldestShort = shortSha(repo, env, tailCommits[0]);
   const headShort = shortSha(repo, env, headSha);
@@ -376,7 +438,10 @@ function cmdTail(bin: string, args: string[]): void {
   try {
     createBackupBundle(repo, env);
     const tree = git.text(repo, ['rev-parse', headSha + '^{tree}'], { env });
-    const position = groups.length;
+    /* § 4.3: the position in the resulting history is the parent's plus
+     * one, not the number of tagged commits -- they differ as soon as an
+     * untagged commit comes before the last tag (D23, AC-99). */
+    const position = parentCommit ? allCommits.indexOf(parentCommit) + 1 : 0;
     const when = dates === 'anon' ? anonDateAt(position) : rawDateOf(repo, env, headSha, 'a');
     const whenC = dates === 'anon' ? anonDateAt(position) : rawDateOf(repo, env, headSha, 'c');
     const ctArgs = ['commit-tree', '-S', tree];
@@ -410,9 +475,18 @@ function cmdTail(bin: string, args: string[]): void {
   }
 }
 
+/** One synopsis per subcommand, as docs/SPECIFICATION.md § 1 lists them
+ * (`--help`, § 0; AC-100). */
+const SYNOPSES: Record<string, string> = {
+  plan: 'git-release-squash plan <repo> [--name=<name>]',
+  apply: 'git-release-squash apply <repo> --map <file> [--name=<name>] [--dates=anon|keep] [--apply]',
+  tail: 'git-release-squash tail <repo> [--name=<name>] [--dates=anon|keep] [--tag=<tag> (--message=<text>|--message-file=<path>)] [--apply]',
+};
+
 main('git-release-squash', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, 'apply and tail are a dry run unless --apply is given. See docs/SPECIFICATION.md § 1.')) return;
   if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' plan|apply|tail <repo> ...)');
   if (sub === 'plan') return cmdPlan(bin, rest);
   if (sub === 'apply') return cmdApply(bin, rest);

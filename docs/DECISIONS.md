@@ -1664,3 +1664,163 @@ What the digit rule costs, in both directions:
   each.
 - Names that do not end in one of the words stay out (`secret_key_base`,
   `private_key_id`). That is a known gap, not an oversight.
+
+## D23: tail's date, CLI hygiene and plan output (ght next candidate, survey "Also noted")
+
+**tail dates by position (AC-99).** § 4.3 dates each new commit by its
+position in the resulting history. `tail` used the number of tagged
+commits instead. The two agree only when every commit before the tail
+is tagged, which is the shape `apply` leaves. With an untagged commit
+before the last tag they differ: `first`, `second` (v1), then the tail
+was dated 1970-01-03, the slot of `second` itself, instead of 01-04.
+The position is now the parent's index in `rev-list --reverse HEAD`
+plus one, or 0 with no tag at all. Checked read-only: no published
+release was affected. In ght v0.1..v0.4.3 and nanojira's v3.3..v4.1.2,
+every commit before a release tip is tagged, so the two numbers were
+equal.
+
+**--help everywhere (AC-100).** Only git-sign had a help form (D17);
+`git-release-squash --help` was "unknown subcommand '--help'", and
+`<sub> --help` was "unknown flag", exit 2. git-sign's form now lives in
+`cli.printHelp` and every tool uses it, with the same words (`--help`,
+`-h`, `help`) and the same output. Each tool's synopses are a code block
+at the head of its spec section, and AC-100 reads them from there, so the
+spec and `--help` cannot drift apart. The three other tools keep their
+one-line no-subcommand error (AC-86). `-h` or `--help` anywhere among a
+subcommand's arguments prints its synopsis, as git-sign's did; to pass
+`-h` as a value, use the `=` form (`--message=-h`).
+
+**Stray positionals (AC-101).** git-sign refused a positional it does not
+take (`unexpected argument: <arg>`); the other three tools ignored it, so
+`replace <repo> --rules <f> --apply <typo>` rewrote the history and said
+nothing. Every subcommand with a fixed number of positionals now
+refuses the next one with git-sign's message, a usage error, before
+anything is read. `resign-tags` takes any number of tag names, so it has
+no such case.
+
+**Unreadable input files (AC-102).** `--message-file=/nonexistent` crashed
+with a node stack trace, exit 1, in squash `tail --tag` and git-sign
+`commit`/`tag`. So did a directory or an unreadable file as `--rules`,
+`--terms`, `--allow` or add-file's `<path>`, which got past their
+existence check. Every such read now goes through `cli.readUserFile`, a
+usage error naming the flag, the reason and the path. A usage error, not
+a refusal: the caller gave a bad argument; the repository is fine.
+git-sign's `--policy` stays a refusal (exit 1) by design: a missing or
+unreadable policy is the same class as an invalid one (`policy.ts`
+`loadPolicy`, AC-48), the configuration the run would enforce, not an
+input it reads. A FIFO named as an input file still blocks until written
+to; that is older than D23, and the caller named the path.
+
+**The bundle path (AC-103).** No tool printed where its backup bundle
+went. `createBackupBundle` now prints `backup: <path>` on stdout as soon
+as the bundle exists, so every --apply that writes one names it, now and
+in any later caller. The line is printed also when a refusal follows,
+e.g. a failed ref transaction (§ 4.5): that is when the caller most needs
+the restore point. So § 0's "nothing on stdout on a refusal" gets that
+one exception, and AC-74, AC-78 and AC-91 check for exactly that line
+instead of empty stdout. stdout, not stderr: it is an event line like
+`verify:`, and a refusal keeps its one stderr line. git-sign `commit`/`tag`
+add an object and move one ref; they write no bundle, so no line.
+
+**plan's per-tag lines (AC-104).** § 1.1 always said what `plan`
+prints; the code did not. `<subject>` was the bare title, not `<name>
+<tag>: <title>`; `<tag-short>` was the short sha of the tag object (of the
+commit for a lightweight tag), not a preview of the squash commit; the
+tree line was a hard-coded `OK`; and the title came from
+`%(contents:subject)`, which joins a message's first paragraph into one
+line, so `first line` / `second line` became `first line second line`.
+`plan` now builds the unsigned commit `apply` would write (tree, parent
+chain, subject, dates, no `encoding` header, AC-106) and hashes it with `git
+hash-object -t commit` without `-w`, so nothing is stored; the tree line
+compares that commit's tree with the tag's. The title is the first line of
+the raw message, the same text `apply` and `tail --tag` use. Taken raw,
+a CRLF message's first line ended in a CR, which went into the release
+commit's subject and plan's line (Scout; not in 0.4.4, whose
+`%(contents:subject)` trimmed it). Every title, annotated, lightweight
+or `tail`'s, now goes through one rule: every control character (C0
+but tab, DEL, and C1, which holds the one-byte CSI U+009B) becomes a
+space, then trailing spaces and tabs are trimmed, as git trims a
+subject. In that order a CRLF's CR, by then a space, goes with the trim,
+a trailing ESC leaves no trailing space, and a line of nothing but
+controls is `(no title)`. A lone CR or an ESC mid-line would otherwise
+rewrite the terminal line `plan` prints and `git log --oneline` shows.
+A space keeps the title readable; a refusal would block a release over a
+byte in a message nobody reads raw. The tag message itself still gets
+`git tag`'s default cleanup when `apply` re-creates it, as before. `tail
+--tag` had the same CR from a CRLF `--message-file` before D23; the same
+rule fixes it. The author and
+committer identity come from `git var GIT_AUTHOR_IDENT` and
+`GIT_COMMITTER_IDENT`, and `plan`, read-only, does not fail without one:
+the preview then says `unknown <unknown>`. The old title came from the
+same join on the `apply` side: the stored tag message was rewritten as
+`%(contents:subject)` plus body, so its first two lines became one. It is
+now kept as it was (AC-104).
+
+**Message files that are not UTF-8 (AC-105).** A carry-over from the
+0.4.4 review: `--message-file` was decoded with `toString('utf8')`, so
+bytes that are not UTF-8 became U+FFFD in the tag or commit written, and
+it was then signed. Since ght writes UTF-8 objects only (D21), such a file
+is now refused like an unreadable one (AC-102): one usage-error line,
+`--message-file: not valid UTF-8: <path>`, before anything is written.
+A leading BOM is kept, as before.
+
+**No encoding header (AC-106).** Found while pinning the preview
+(AC-104): in a repository with `i18n.commitEncoding=ISO-8859-1`, set
+after its history was made, `apply`, `tail` and `replace` (`commit-tree`)
+and git-sign `commit` (`git commit`) stamped `encoding ISO-8859-1` on the
+commits they wrote, over the UTF-8 bytes ght gave them. A viewer that
+honours the header shows `café` as `cafÃ©`. `replace` also read each
+message through `log --format`, which re-encodes to
+`i18n.logOutputEncoding` (default: `i18n.commitEncoding`), so it wrote
+Latin-1 bytes, and `scan` and git-sign `check` matched UTF-8 terms and
+patterns against those bytes, so `--terms café` found nothing.
+`resign-commits` added the header to commits that had none, and then
+failed its own "headers preserved" verify after the ref had moved
+(exit 1). D21 already refuses a source commit whose `encoding`
+header is not UTF-8, so a source ght accepts has no header (or a UTF-8
+one, which git itself never writes). A new commit gets no header, whatever
+the repository's setting and whatever its source had. One pin
+does this for every git call: `git.run` passes `-c
+i18n.commitEncoding=UTF-8 -c i18n.logOutputEncoding=UTF-8`, next to its
+hook and fsmonitor pins. That covers every commit writer and every
+message read in one place, the ones added later included. Copying a
+source's header instead would need a per-writer special case for a
+header D21 never lets through. The `plan` preview drops its `encoding`
+line to match.
+
+**An explicit UTF-8 header (AC-107).** D21 lets a source commit with
+`encoding UTF-8` (or `utf8`) through, and the pin above writes its
+successor without the header. For `replace` that is fine: the commit is
+new anyway, and no header means UTF-8, the same as the one dropped; the
+message bytes stay as they were. For `resign-commits` it is not: a
+re-signed commit must differ only in its signature (and its parent), so it
+moved the ref and then failed its own "headers preserved" verify, exit 1.
+It now refuses any commit it would re-sign that has an `encoding` header,
+before anything is written (D20): exit 1, one stderr line naming the
+commit, dry run included. Keeping the header would need commit-tree to
+write one the pin exists to stop; such commits are rare (git never writes
+the header for UTF-8), and `replace` is the way to drop it first.
+
+**Exit codes: documented, not split (proposal).** § 0 now lists what
+each code means today: 0 success, 2 usage error, and 1 for everything
+else: refusal, FAILED verify, scan hits, check violations, a crash.
+Distinct codes were to go in only if cheap and additive. They are cheap,
+but not additive. `scan` and `check` are documented as exit 1 on a hit,
+and `check` is a pre-push gate, so a hook or script that tests `= 1`, or
+tells a hit from a crash by 1 vs. anything else, would change meaning.
+Not done; the proposal, for a release that may break callers:
+
+- 0 success, 2 usage error, unchanged;
+- 1 a refusal before anything was written;
+- 3 written, but a verify line FAILED, or a ref created during the run
+  is still on the old history (§ 4.5) (the refs moved; restore from the
+  bundle);
+- 4 `scan` hits / `check` violations (the run itself worked);
+- 5 a refusal after the bundle (refs unchanged, bundle kept);
+- 70 a crash (`EX_SOFTWARE`): `main` catches any other error, prints
+  one line plus the stack, and exits 70 instead of node's 1.
+
+Callers that only test `!= 0` keep working; `= 1` callers need the
+CHANGES note. A step that is additive on its own: the crash code alone
+(today 1, and a crash is never contract). It is still left for the same
+decision, so the codes change once.

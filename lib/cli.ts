@@ -107,6 +107,52 @@ export function resolveOutsideFile(repo: string, flagName: string, filePath: str
   return realFileFull;
 }
 
+/** Reads a file the caller named (a flag's value or a positional). Missing,
+ * a directory or unreadable is one usage-error line naming `label` and
+ * the path, never a stack trace (D23, AC-102). */
+export function readUserFile(label: string, file: string): Buffer {
+  try {
+    return fs.readFileSync(file);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    const why = code === 'ENOENT' ? 'no such file' : code === 'EISDIR' ? 'is a directory' :
+      code === 'EACCES' ? 'permission denied' : 'cannot read (' + (code || (e as Error).message) + ')';
+    throw new UsageError(label + ': ' + why + ': ' + file);
+  }
+}
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** `bytes` as text, for a message file the caller named (`file`, `-` for
+ * stdin). Bytes that are not valid UTF-8 are one usage-error line, not
+ * U+FFFD in the object written (D23, AC-105). */
+export function decodeUserText(label: string, file: string, bytes: Buffer): string {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    throw new UsageError(label + ': not valid UTF-8: ' + file);
+  }
+}
+
+const HELP_WORDS = ['--help', '-h', 'help'];
+
+/** § 0: `<bin> --help`/`-h`/`help` prints `usage:` and every synopsis on
+ * stdout, `<bin> <sub> --help` (or `-h`) prints `usage: <its synopsis>`,
+ * both before any flag parsing, so they never fail on the arguments
+ * around them. Returns true when it printed (the run is then exit 0). */
+export function printHelp(sub: string | undefined, rest: string[], synopses: Record<string, string>, footer: string): boolean {
+  if (sub === undefined) return false;
+  if (HELP_WORDS.includes(sub)) {
+    process.stdout.write('usage:\n' + Object.values(synopses).map((l) => '  ' + l + '\n').join('') + footer + '\n');
+    return true;
+  }
+  if (Object.hasOwn(synopses, sub) && (rest.includes('--help') || rest.includes('-h'))) {
+    process.stdout.write('usage: ' + synopses[sub] + '\n');
+    return true;
+  }
+  return false;
+}
+
 /** Top-level dispatcher: runs fn(), prints via the <bin>: <reason> contract,
  * and sets the right exit code for UsageError (2) vs Refusal (1). `bin` is
  * the name the user invoked (e.g. 'git-release-squash'), not the lib file's own

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* git-leak-scan (docs/SPECIFICATION.md § 2): scan. */
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main, printHelp, readUserFile } from './cli.ts';
 import * as leakscan from './leakscan.ts';
 
 type Env = NodeJS.ProcessEnv;
@@ -82,6 +82,7 @@ function cmdScan(bin: string, args: string[]): void {
   const { positional, flags } = parseFlags(args, { valueFlags: ['--terms', '--allow'], boolFlags: [] });
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
+  if (positional.length > 1) throw new UsageError('unexpected argument: ' + positional[1]);
   requireRepo(repo);
   const env = process.env;
 
@@ -89,8 +90,8 @@ function cmdScan(bin: string, args: string[]): void {
   let allowPath: string | null = null;
   if (flags.terms !== undefined) termsPath = resolveOutsideFile(repo, '--terms', flags.terms as string);
   if (flags.allow !== undefined) allowPath = resolveOutsideFile(repo, '--allow', flags.allow as string);
-  const terms = termsPath ? leakscan.readLines(termsPath, true) : [];
-  const allow = new Set(allowPath ? leakscan.readLines(allowPath, false) : []);
+  const terms = termsPath ? leakscan.parseLines(readUserFile('--terms', termsPath).toString('utf8'), true) : [];
+  const allow = new Set(allowPath ? leakscan.parseLines(readUserFile('--allow', allowPath).toString('utf8'), false) : []);
 
   const targets = collectTargets(repo, env);
   const seenPairs = new Set<string>();
@@ -150,9 +151,15 @@ function cmdScan(bin: string, args: string[]): void {
   process.exitCode = lines.length > 0 ? 1 : 0;
 }
 
+/** The one synopsis, as docs/SPECIFICATION.md § 2 lists it (`--help`, § 0; AC-100). */
+const SYNOPSES: Record<string, string> = {
+  scan: 'git-leak-scan scan <repo> [--terms <file>] [--allow <file>]',
+};
+
 main('git-leak-scan', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, 'Read-only. See docs/SPECIFICATION.md § 2.')) return;
   if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' scan <repo> ...)');
   if (sub === 'scan') return cmdScan(bin, rest);
   throw new UsageError('unknown subcommand \'' + sub + '\'');

@@ -85,3 +85,36 @@ What a caller has to change:
 
 `git-sign` is new in v0.4.0 and has no earlier public form, so nothing about
 it needs migrating.
+
+# Migrating from v0.4.4 to v0.4.5
+
+Three calls that used to go through, or crash, are now the usage error
+(exit 2, one stderr line, nothing done), as in the v0.4 change above:
+
+- A positional argument the subcommand does not take, e.g. a typo after
+  `--apply`: `<bin>: unexpected argument: <arg>`. git-release-squash,
+  git-history-rewrite and git-leak-scan ignored it and ran; git-sign
+  already refused it (D23).
+- A `--message-file`, `--rules`, `--terms`, `--allow` or add-file `<path>`
+  that is missing, a directory or unreadable: `<bin>: <flag>: no such
+  file|is a directory|permission denied: <path>`. It was a node stack
+  trace, exit 1.
+- A `--message-file` that is not valid UTF-8: `<bin>: --message-file: not
+  valid UTF-8: <path>`. Its bytes were written as U+FFFD.
+
+A script that treated exit 0/1 as the only outcomes should expect exit 2
+here. And every `--apply` that writes a backup bundle now prints `backup:
+<path>` as its first stdout line, also before a refusal; a script that
+expected no stdout from such a refusal sees this line.
+
+`git-release-squash plan` prints what § 1.1 always said: `into "<name>
+<tag>: <title>"` instead of `into "<title>"`, and as `<tag-short>` the
+preview sha of the squash commit `apply` would build, not the tag's own
+sha. A script that read either from `plan`'s output has to change.
+
+In a repository with `i18n.commitEncoding` set, the commits ght writes no
+longer carry an `encoding` header. Their bytes are UTF-8, as before; only
+the wrong label is gone. A source commit with an explicit `encoding
+UTF-8` header loses it in `replace`, and `resign-commits` refuses it
+(exit 1, nothing written) instead of moving the ref and failing its
+verify; run `replace` first to drop the header.

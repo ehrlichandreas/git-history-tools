@@ -56,12 +56,13 @@ function configCountEnv(pairs) {
   );
 }
 var NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+var UTF8_ONLY = ["-c", "i18n.commitEncoding=UTF-8", "-c", "i18n.logOutputEncoding=UTF-8"];
 function run(repo, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env, o.env || {});
   for (const k of CALLER_GIT_ENV) if (k !== "GIT_CONFIG_COUNT") delete env[k];
   env.GIT_NO_REPLACE_OBJECTS = "1";
-  const pre = NO_REPO_CODE.concat(o.config || []);
+  const pre = NO_REPO_CODE.concat(UTF8_ONLY, o.config || []);
   const r = spawnSync("git", ["-C", repo].concat(pre, args), {
     env,
     input: o.input,
@@ -183,6 +184,29 @@ function resolveOutsideFile(repo, flagName, filePath) {
   }
   return realFileFull;
 }
+function readUserFile(label, file) {
+  try {
+    return fs.readFileSync(file);
+  } catch (e) {
+    const code = e.code;
+    const why = code === "ENOENT" ? "no such file" : code === "EISDIR" ? "is a directory" : code === "EACCES" ? "permission denied" : "cannot read (" + (code || e.message) + ")";
+    throw new UsageError(label + ": " + why + ": " + file);
+  }
+}
+var UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var HELP_WORDS = ["--help", "-h", "help"];
+function printHelp(sub, rest, synopses, footer) {
+  if (sub === void 0) return false;
+  if (HELP_WORDS.includes(sub)) {
+    process.stdout.write("usage:\n" + Object.values(synopses).map((l) => "  " + l + "\n").join("") + footer + "\n");
+    return true;
+  }
+  if (Object.hasOwn(synopses, sub) && (rest.includes("--help") || rest.includes("-h"))) {
+    process.stdout.write("usage: " + synopses[sub] + "\n");
+    return true;
+  }
+  return false;
+}
 function main(bin, fn) {
   const identity = callerIdentityConfig(process.env);
   for (const k of callerGitEnvNames(process.env)) delete process.env[k];
@@ -204,14 +228,14 @@ function main(bin, fn) {
 }
 
 // lib/encoding.ts
-var UTF8 = new TextDecoder("utf-8", { fatal: true });
+var UTF82 = new TextDecoder("utf-8", { fatal: true });
 function nonUtf8Reason(raw) {
   const end = raw.indexOf("\n\n");
   const head = (end === -1 ? raw : raw.subarray(0, end)).toString("latin1");
   const m = /^encoding (.*)$/m.exec(head);
   if (m && !/^utf-?8$/i.test(m[1].trim())) return "encoding " + m[1].trim();
   try {
-    UTF8.decode(raw);
+    UTF82.decode(raw);
   } catch {
     return "bytes that are not valid UTF-8 in its message or identity";
   }
@@ -341,11 +365,11 @@ function createBackupBundle(repo, env) {
   const stamp = utcStamp(/* @__PURE__ */ new Date());
   const bundlePath = path4.join(dir, base + ".backup-" + stamp + ".bundle");
   text(repo, ["bundle", "create", bundlePath, "--all"], { env });
+  process.stdout.write("backup: " + bundlePath + "\n");
   return bundlePath;
 }
 
 // lib/leakscan.ts
-import { readFileSync } from "node:fs";
 var RE_EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}/g;
 var RE_URL = /https?:\/\/[^\s)"'`>\]]+/g;
 var RE_LOCAL_PATH = /\/Users\/[^\s"'`<>]+|\/home\/[^\s"'`<>]+|[Cc]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\s"'`<>]+|(?<![A-Za-z0-9._~-])\/root\/[^\s"'`<>]+|(?<![A-Za-z0-9._\/~-])~[A-Za-z_][A-Za-z0-9_.-]*\/[^\s"'`<>]+/g;
@@ -849,7 +873,7 @@ function runRewrite(bin, sub, repo, env, opts) {
   }
 }
 function parseRulesFile(rulesPath) {
-  const raw = fs4.readFileSync(rulesPath, "utf8");
+  const raw = readUserFile("--rules", rulesPath).toString("utf8");
   const lines = raw.split("\n");
   const rules = [];
   lines.forEach((line2, i) => {
@@ -869,6 +893,7 @@ function cmdReplace(bin, args) {
   const { positional, flags } = parseFlags(args, { valueFlags: ["--rules", "--hook"], boolFlags: ["--apply"] });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
+  if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
   if (!flags.rules) throw new UsageError("missing --rules");
   requireRepo(repo);
   const env = process.env;
@@ -896,10 +921,11 @@ function cmdAddFile(bin, args) {
   const srcPath = positional[1];
   if (!repo) throw new UsageError("missing <repo>");
   if (!srcPath) throw new UsageError("missing <path>");
+  if (positional.length > 2) throw new UsageError("unexpected argument: " + positional[2]);
   if (!fs4.existsSync(srcPath)) throw new UsageError("<path> does not exist: " + srcPath);
   requireRepo(repo);
   const env = process.env;
-  const content = fs4.readFileSync(srcPath);
+  const content = readUserFile("<path>", srcPath);
   const st = fs4.statSync(srcPath);
   const mode = (st.mode & 73) !== 0 ? "100755" : "100644";
   const asPath = flags.as || path5.basename(srcPath);
@@ -919,9 +945,14 @@ function cmdAddFile(bin, args) {
     precheck: (oldTree) => refuseDirectoryAt(repo, env, oldTree, segments, asPath)
   });
 }
+var SYNOPSES = {
+  replace: "git-history-rewrite replace <repo> --rules <file> [--hook <script>] [--apply]",
+  "add-file": "git-history-rewrite add-file <repo> <path> [--as <repo-path>] [--apply]"
+};
 main("git-history-rewrite", (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, "Every subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md \xA7 3.")) return;
   if (sub === void 0) throw new UsageError("missing subcommand (usage: " + bin + " replace|add-file <repo> ...)");
   if (sub === "replace") return cmdReplace(bin, rest);
   if (sub === "add-file") return cmdAddFile(bin, rest);

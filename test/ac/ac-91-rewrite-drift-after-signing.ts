@@ -56,7 +56,8 @@ for (const [label, drift, action] of CASES) {
   T.exit(l + ': a refusal, exit 1', r, 1);
   T.check(l + ': one stderr line, the drift refusal naming the ref', r.stderr.split('\n').length === 2 &&
     r.stderr.startsWith('git-history-rewrite: refs changed during the run (') && r.stderr.includes(drift), r.stderr);
-  T.eq(l + ': nothing on stdout', r.stdout, '');
+  { const b = H.findBackupBundle(repo);
+    T.eq(l + ': stdout is only the backup line (§ 4.1, D23)', r.stdout, b ? 'backup: ' + fs.realpathSync(b) + '\n' : '(no bundle)'); }
   const bundle = H.findBackupBundle(repo);
   T.check(l + ': the backup bundle is kept', bundle !== null, '');
   if (!bundle) continue;

@@ -10,7 +10,8 @@ function utcStamp(d: Date): string {
 }
 
 /** Creates <parent-of-top>/<top-basename>.backup-<UTC>.bundle, --all,
- * capturing every ref as it stands right now. Returns the bundle path.
+ * capturing every ref as it stands right now, and prints `backup: <path>`
+ * on stdout. Returns the bundle path.
  * <repo> is its repository's top level (requireRepo), possibly through a
  * symlink; the bundle goes next to the REAL top level, so never inside
  * the work tree, where it would sit as an untracked file (AC-70) -- not
@@ -27,5 +28,8 @@ export function createBackupBundle(repo: string, env: NodeJS.ProcessEnv): string
   const stamp = utcStamp(new Date());
   const bundlePath = path.join(dir, base + '.backup-' + stamp + '.bundle');
   git.text(repo, ['bundle', 'create', bundlePath, '--all'], { env });
+  /* Every writing --apply names its bundle, the restore point, as soon as
+   * it exists -- also when a refusal follows (§ 4.1, D23, AC-103). */
+  process.stdout.write('backup: ' + bundlePath + '\n');
   return bundlePath;
 }

@@ -38,12 +38,12 @@ if (gpg) {
     T.contains('AC-03: lightweight tag v1 is reported like any other tag',
       r.stdout, 'plan: v1 folds 1 commit(s)');
     T.contains('AC-03: lightweight v1\'s subject falls back to its commit\'s own subject',
-      r.stdout, '"root"');
+      r.stdout, ' v1: root"');
     T.contains('AC-03: annotated tag v2 is reported', r.stdout, 'plan: v2 folds 1 commit(s)');
     T.contains('AC-03: annotated v2\'s subject is its own tag message, not the commit subject',
-      r.stdout, '"annotated release title"');
+      r.stdout, ' v2: annotated release title"');
     T.check('AC-03: v2\'s line does not instead show the commit subject "second subject line"',
-      !r.stdout.includes('"second subject line"'), r.stdout);
+      !r.stdout.includes(': second subject line"'), r.stdout);
     T.contains('AC-03: both tags get a tree-equality OK line', r.stdout, 'plan: v1 tree equals');
     T.contains('AC-03: v2 tree-equality OK', r.stdout, 'plan: v2 tree equals');
   }

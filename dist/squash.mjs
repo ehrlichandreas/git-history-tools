@@ -55,12 +55,13 @@ function configCountEnv(pairs) {
   );
 }
 var NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+var UTF8_ONLY = ["-c", "i18n.commitEncoding=UTF-8", "-c", "i18n.logOutputEncoding=UTF-8"];
 function run(repo, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env, o.env || {});
   for (const k of CALLER_GIT_ENV) if (k !== "GIT_CONFIG_COUNT") delete env[k];
   env.GIT_NO_REPLACE_OBJECTS = "1";
-  const pre = NO_REPO_CODE.concat(o.config || []);
+  const pre = NO_REPO_CODE.concat(UTF8_ONLY, o.config || []);
   const r = spawnSync("git", ["-C", repo].concat(pre, args), {
     env,
     input: o.input,
@@ -171,6 +172,36 @@ function requireRepo(repo) {
     throw new Refusal("not the top level of its repository (" + repo + "; the top level is " + (top === null ? "unknown" : fs.realpathSync(top)) + ")");
   }
 }
+function readUserFile(label, file) {
+  try {
+    return fs.readFileSync(file);
+  } catch (e) {
+    const code = e.code;
+    const why = code === "ENOENT" ? "no such file" : code === "EISDIR" ? "is a directory" : code === "EACCES" ? "permission denied" : "cannot read (" + (code || e.message) + ")";
+    throw new UsageError(label + ": " + why + ": " + file);
+  }
+}
+var UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+function decodeUserText(label, file, bytes) {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    throw new UsageError(label + ": not valid UTF-8: " + file);
+  }
+}
+var HELP_WORDS = ["--help", "-h", "help"];
+function printHelp(sub, rest, synopses, footer) {
+  if (sub === void 0) return false;
+  if (HELP_WORDS.includes(sub)) {
+    process.stdout.write("usage:\n" + Object.values(synopses).map((l) => "  " + l + "\n").join("") + footer + "\n");
+    return true;
+  }
+  if (Object.hasOwn(synopses, sub) && (rest.includes("--help") || rest.includes("-h"))) {
+    process.stdout.write("usage: " + synopses[sub] + "\n");
+    return true;
+  }
+  return false;
+}
 function main(bin, fn) {
   const identity = callerIdentityConfig(process.env);
   for (const k of callerGitEnvNames(process.env)) delete process.env[k];
@@ -192,14 +223,14 @@ function main(bin, fn) {
 }
 
 // lib/encoding.ts
-var UTF8 = new TextDecoder("utf-8", { fatal: true });
+var UTF82 = new TextDecoder("utf-8", { fatal: true });
 function nonUtf8Reason(raw) {
   const end = raw.indexOf("\n\n");
   const head = (end === -1 ? raw : raw.subarray(0, end)).toString("latin1");
   const m = /^encoding (.*)$/m.exec(head);
   if (m && !/^utf-?8$/i.test(m[1].trim())) return "encoding " + m[1].trim();
   try {
-    UTF8.decode(raw);
+    UTF82.decode(raw);
   } catch {
     return "bytes that are not valid UTF-8 in its message or identity";
   }
@@ -329,11 +360,9 @@ function createBackupBundle(repo, env) {
   const stamp = utcStamp(/* @__PURE__ */ new Date());
   const bundlePath = path4.join(dir, base + ".backup-" + stamp + ".bundle");
   text(repo, ["bundle", "create", bundlePath, "--all"], { env });
+  process.stdout.write("backup: " + bundlePath + "\n");
   return bundlePath;
 }
-
-// lib/leakscan.ts
-import { readFileSync } from "node:fs";
 
 // lib/verify.ts
 function line(name, ok, reason) {
@@ -430,31 +459,60 @@ function groupsFromTags(allCommits, tags) {
   }
   return { groups, tailCommits: allCommits.slice(prevIdx + 1) };
 }
-function titleFor(repo, env, tag) {
-  if (tag.type === "tag") {
-    const s = text(repo, ["for-each-ref", "--format=%(contents:subject)", "refs/tags/" + tag.name], { env });
-    return s === "" ? "(no title)" : s;
-  }
-  return text(repo, ["log", "-1", "--format=%s", tag.commit], { env });
+function tagMessage(repo, env, name) {
+  const fmt = (f) => run(repo, ["for-each-ref", "--format=" + f, "refs/tags/" + name], { env });
+  const all = fmt("%(contents)");
+  const sig = fmt("%(contents:signature)");
+  if (all.status !== 0) throw new GitError(["for-each-ref", "refs/tags/" + name], all);
+  if (sig.status !== 0) throw new GitError(["for-each-ref", "refs/tags/" + name], sig);
+  const contents = all.stdout.replace(/\n$/, "");
+  const signature = sig.stdout.replace(/\n$/, "");
+  return signature && contents.endsWith(signature) ? contents.slice(0, contents.length - signature.length) : contents;
 }
-function renderPlanLines(repo, env, name) {
+function titleFor(repo, env, tag) {
+  return titleLine(tag.type === "tag" ? tagMessage(repo, env, tag.name) : text(repo, ["log", "-1", "--format=%s", tag.commit], { env }));
+}
+function titleLine(text2) {
+  const t = text2.split("\n")[0].replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, " ").replace(/[ \t]+$/, "");
+  return t === "" ? "(no title)" : t;
+}
+function previewCommit(repo, env, tree, parent, subject, authorDate, committerDate) {
+  const dated = Object.assign({}, env, { GIT_AUTHOR_DATE: authorDate, GIT_COMMITTER_DATE: committerDate });
+  const ident = (v, date) => {
+    const r = run(repo, ["var", v], { env: dated });
+    return r.status === 0 ? r.stdout.replace(/\n$/, "") : "unknown <unknown> " + date.replace(/^@/, "");
+  };
+  const object = "tree " + tree + "\n" + (parent ? "parent " + parent + "\n" : "") + "author " + ident("GIT_AUTHOR_IDENT", authorDate) + "\ncommitter " + ident("GIT_COMMITTER_IDENT", committerDate) + "\n\n" + subject + "\n";
+  return { sha: text(repo, ["hash-object", "-t", "commit", "--stdin"], { env, input: object }), object };
+}
+function renderPlanLines(repo, env, name, dates) {
   const allCommits = revListReverseHead(repo, env);
   const tags = loadTagIndex(repo, env);
   const { groups, tailCommits } = groupsFromTags(allCommits, tags);
   const lines = [];
   let lastGroupTagName = null;
+  let parent = null;
+  let idx = 0;
   for (const g of groups) {
     const groupOldestShort = shortSha(repo, env, g.commits[0]);
     const tipShort = shortSha(repo, env, g.tip);
+    const tree = text(repo, ["rev-parse", g.tip + "^{tree}"], { env });
+    const subject = name + " " + g.tags[0].name + ": " + titleFor(repo, env, g.tags[0]);
+    const authorDate = dates === "anon" ? anonDateAt(idx) : rawDateOf(repo, env, g.tip, "a");
+    const committerDate = dates === "anon" ? anonDateAt(idx) : rawDateOf(repo, env, g.tip, "c");
+    const preview = previewCommit(repo, env, tree, parent, subject, authorDate, committerDate);
+    const previewShort = preview.sha.slice(0, tipShort.length);
+    const previewTree = (/^tree ([0-9a-f]+)$/m.exec(preview.object) || [])[1];
     g.tags.forEach((t, i) => {
       const n = i === 0 ? g.commits.length - (g.tags.length - 1) : 1;
       const oldestShort = i === 0 ? groupOldestShort : tipShort;
-      const title = titleFor(repo, env, t);
-      const tagShort = shortSha(repo, env, "refs/tags/" + t.name);
-      lines.push("plan: " + t.name + " folds " + n + " commit(s) (" + oldestShort + ".." + tagShort + ') into "' + title + '"');
-      lines.push("plan: " + t.name + " tree equals " + tagShort + "'s own tree: OK");
+      const tagTree = text(repo, ["rev-parse", t.commit + "^{tree}"], { env });
+      lines.push("plan: " + t.name + " folds " + n + " commit(s) (" + oldestShort + ".." + previewShort + ') into "' + subject + '"');
+      lines.push("plan: " + t.name + " tree equals " + previewShort + "'s own tree: " + (previewTree === tagTree ? "OK" : "FAIL"));
     });
     lastGroupTagName = g.tags[0].name;
+    parent = preview.sha;
+    idx++;
   }
   if (tailCommits.length > 0) {
     if (groups.length === 0) {
@@ -473,9 +531,7 @@ function rawDateOf(repo, env, rev, which) {
   return "@" + raw;
 }
 function tagRawMessage(repo, env, name) {
-  const s = text(repo, ["for-each-ref", "--format=%(contents:subject)", "refs/tags/" + name], { env });
-  const b = text(repo, ["for-each-ref", "--format=%(contents:body)", "refs/tags/" + name], { env }).replace(/\s+$/, "");
-  return s + (b ? "\n\n" + b : "") + "\n";
+  return tagMessage(repo, env, name).replace(/\s+$/, "") + "\n";
 }
 function cleanTagMessage(repo, env, msg) {
   const r = run(repo, ["stripspace", "--strip-comments"], { env, input: msg });
@@ -508,11 +564,12 @@ function cmdPlan(bin, args) {
   const { positional, flags } = parseFlags(args, { valueFlags: ["--name"], boolFlags: [] });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
+  if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
   requireRepo(repo);
   const env = process.env;
   refuseOnMerge(repo, env);
   const name = flags.name || defaultName(repo);
-  const { lines } = renderPlanLines(repo, env, name);
+  const { lines } = renderPlanLines(repo, env, name, "anon");
   process.stdout.write(lines.map((l) => l + "\n").join(""));
 }
 function cmdApply(bin, args) {
@@ -522,6 +579,7 @@ function cmdApply(bin, args) {
   });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
+  if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
   if (!flags.map) throw new UsageError("missing --map");
   const mapPath = path5.resolve(flags.map);
   if (!fs4.existsSync(path5.dirname(mapPath)) || !fs4.statSync(path5.dirname(mapPath)).isDirectory()) {
@@ -541,7 +599,7 @@ function cmdApply(bin, args) {
   refuseNonUtf8(repo, env, groups.flatMap((g) => g.tags).filter((t) => t.type === "tag").map((t) => ({ sha: t.obj, label: "tag " + t.name })));
   if (!headTagged) throw new Refusal("HEAD is not tagged -- run 'tail' first");
   const name = flags.name || defaultName(repo);
-  const { lines } = renderPlanLines(repo, env, name);
+  const { lines } = renderPlanLines(repo, env, name, dates);
   if (!flags.apply) {
     process.stdout.write(lines.map((l) => l + "\n").join(""));
     process.stdout.write(bin + ": dry run, no ref changed (use --apply to write)\n");
@@ -604,6 +662,7 @@ function cmdTail(bin, args) {
   });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
+  if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
   if (flags.map !== void 0) throw new UsageError("tail does not take --map");
   const dates = flags.dates || "anon";
   if (dates !== "anon" && dates !== "keep") throw new UsageError("--dates must be 'anon' or 'keep'");
@@ -619,7 +678,11 @@ function cmdTail(bin, args) {
   if (flags.tag !== void 0 && !isValidTagName(flags.tag)) {
     throw new UsageError("--tag: " + JSON.stringify(flags.tag) + " is not a valid tag name");
   }
-  const tagMessageText = hasMessage ? flags.message : hasMessageFile ? fs4.readFileSync(flags["message-file"], "utf8") : null;
+  const tagMessageText = hasMessage ? flags.message : hasMessageFile ? decodeUserText(
+    "--message-file",
+    flags["message-file"],
+    readUserFile("--message-file", flags["message-file"])
+  ) : null;
   requireRepo(repo);
   const env = process.env;
   refuseOnMerge(repo, env);
@@ -641,7 +704,7 @@ function cmdTail(bin, args) {
     throw new UsageError("--tag: the tag message is empty");
   }
   const name = flags.name || defaultName(repo);
-  const title = flags.tag !== void 0 ? tagMessageText.split("\n")[0] : text(repo, ["log", "-1", "--format=%s", headSha], { env });
+  const title = titleLine(flags.tag !== void 0 ? tagMessageText : text(repo, ["log", "-1", "--format=%s", headSha], { env }));
   const subject = flags.tag !== void 0 ? name + " " + flags.tag + ": " + title : name + " (untagged): " + title;
   const oldestShort = shortSha(repo, env, tailCommits[0]);
   const headShort = shortSha(repo, env, headSha);
@@ -658,7 +721,7 @@ function cmdTail(bin, args) {
   try {
     createBackupBundle(repo, env);
     const tree = text(repo, ["rev-parse", headSha + "^{tree}"], { env });
-    const position = groups.length;
+    const position = parentCommit ? allCommits.indexOf(parentCommit) + 1 : 0;
     const when = dates === "anon" ? anonDateAt(position) : rawDateOf(repo, env, headSha, "a");
     const whenC = dates === "anon" ? anonDateAt(position) : rawDateOf(repo, env, headSha, "c");
     const ctArgs = ["commit-tree", "-S", tree];
@@ -686,9 +749,15 @@ function cmdTail(bin, args) {
     signer.cleanup();
   }
 }
+var SYNOPSES = {
+  plan: "git-release-squash plan <repo> [--name=<name>]",
+  apply: "git-release-squash apply <repo> --map <file> [--name=<name>] [--dates=anon|keep] [--apply]",
+  tail: "git-release-squash tail <repo> [--name=<name>] [--dates=anon|keep] [--tag=<tag> (--message=<text>|--message-file=<path>)] [--apply]"
+};
 main("git-release-squash", (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, "apply and tail are a dry run unless --apply is given. See docs/SPECIFICATION.md \xA7 1.")) return;
   if (sub === void 0) throw new UsageError("missing subcommand (usage: " + bin + " plan|apply|tail <repo> ...)");
   if (sub === "plan") return cmdPlan(bin, rest);
   if (sub === "apply") return cmdApply(bin, rest);

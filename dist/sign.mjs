@@ -56,12 +56,13 @@ function configCountEnv(pairs) {
   );
 }
 var NO_REPO_CODE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+var UTF8_ONLY = ["-c", "i18n.commitEncoding=UTF-8", "-c", "i18n.logOutputEncoding=UTF-8"];
 function run(repo, args, opts) {
   const o = opts || {};
   const env = Object.assign({}, process.env, o.env || {});
   for (const k of CALLER_GIT_ENV) if (k !== "GIT_CONFIG_COUNT") delete env[k];
   env.GIT_NO_REPLACE_OBJECTS = "1";
-  const pre = NO_REPO_CODE.concat(o.config || []);
+  const pre = NO_REPO_CODE.concat(UTF8_ONLY, o.config || []);
   const r = spawnSync("git", ["-C", repo].concat(pre, args), {
     env,
     input: o.input,
@@ -165,6 +166,36 @@ function isInsideRepo(realRepo, candidate) {
   const rel = path2.relative(realRepo, candidate);
   return rel === "" || !rel.startsWith("..") && !path2.isAbsolute(rel);
 }
+function readUserFile(label, file) {
+  try {
+    return fs.readFileSync(file);
+  } catch (e) {
+    const code = e.code;
+    const why = code === "ENOENT" ? "no such file" : code === "EISDIR" ? "is a directory" : code === "EACCES" ? "permission denied" : "cannot read (" + (code || e.message) + ")";
+    throw new UsageError(label + ": " + why + ": " + file);
+  }
+}
+var UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+function decodeUserText(label, file, bytes) {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    throw new UsageError(label + ": not valid UTF-8: " + file);
+  }
+}
+var HELP_WORDS = ["--help", "-h", "help"];
+function printHelp(sub, rest, synopses, footer) {
+  if (sub === void 0) return false;
+  if (HELP_WORDS.includes(sub)) {
+    process.stdout.write("usage:\n" + Object.values(synopses).map((l) => "  " + l + "\n").join("") + footer + "\n");
+    return true;
+  }
+  if (Object.hasOwn(synopses, sub) && (rest.includes("--help") || rest.includes("-h"))) {
+    process.stdout.write("usage: " + synopses[sub] + "\n");
+    return true;
+  }
+  return false;
+}
 function main(bin, fn) {
   const identity = callerIdentityConfig(process.env);
   for (const k of callerGitEnvNames(process.env)) delete process.env[k];
@@ -186,14 +217,14 @@ function main(bin, fn) {
 }
 
 // lib/encoding.ts
-var UTF8 = new TextDecoder("utf-8", { fatal: true });
+var UTF82 = new TextDecoder("utf-8", { fatal: true });
 function nonUtf8Reason(raw) {
   const end = raw.indexOf("\n\n");
   const head = (end === -1 ? raw : raw.subarray(0, end)).toString("latin1");
   const m = /^encoding (.*)$/m.exec(head);
   if (m && !/^utf-?8$/i.test(m[1].trim())) return "encoding " + m[1].trim();
   try {
-    UTF8.decode(raw);
+    UTF82.decode(raw);
   } catch {
     return "bytes that are not valid UTF-8 in its message or identity";
   }
@@ -323,11 +354,9 @@ function createBackupBundle(repo, env) {
   const stamp = utcStamp(/* @__PURE__ */ new Date());
   const bundlePath = path4.join(dir, base + ".backup-" + stamp + ".bundle");
   text(repo, ["bundle", "create", bundlePath, "--all"], { env });
+  process.stdout.write("backup: " + bundlePath + "\n");
   return bundlePath;
 }
-
-// lib/leakscan.ts
-import { readFileSync } from "node:fs";
 
 // lib/verify.ts
 function line(name, ok, reason) {
@@ -757,7 +786,7 @@ function resolveMessage(flags) {
   if (hasMessage === hasMessageFile) throw new UsageError("exactly one of --message or --message-file is required");
   if (hasMessage) return flags.message;
   const file = flags["message-file"];
-  return file === "-" ? fs5.readFileSync(0, "utf8") : fs5.readFileSync(file, "utf8");
+  return decodeUserText("--message-file", file, file === "-" ? fs5.readFileSync(0) : readUserFile("--message-file", file));
 }
 var DATE_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:?\d{2})?$/;
 function normaliseOffset(off) {
@@ -1237,6 +1266,8 @@ function parseCommitForResign(repo, env, sha) {
   const am = /^author (.*) (\d+) ([+-]\d{4})$/m.exec(raw);
   const cm = /^committer (.*) (\d+) ([+-]\d{4})$/m.exec(raw);
   if (!am || !cm) throw new Refusal(sha.slice(0, 7) + ": malformed commit, missing author/committer line");
+  const end = raw.indexOf("\n\n");
+  const em = /^encoding (.*)$/m.exec(end < 0 ? raw : raw.slice(0, end));
   return {
     sha,
     tree: treeM[1],
@@ -1245,7 +1276,8 @@ function parseCommitForResign(repo, env, sha) {
     authorDate: "@" + am[2] + " " + am[3],
     committerIdent: splitIdent(cm[1]),
     committerDate: "@" + cm[2] + " " + cm[3],
-    committerEpoch: parseInt(cm[2], 10)
+    committerEpoch: parseInt(cm[2], 10),
+    encoding: em ? em[1] : null
   };
 }
 function commitMessageBytes(repo, env, sha) {
@@ -1407,6 +1439,10 @@ function cmdResignCommits(bin, args) {
     ...toRewrite.map((c) => ({ sha: c, label: "commit " + c.slice(0, 7) })),
     ...affectedTags.filter((t) => t.type === "tag").map((t) => ({ sha: t.obj, label: "tag " + t.name }))
   ]);
+  const withHeader = parsed.find((p) => p.encoding !== null);
+  if (withHeader) {
+    throw new Refusal("commit " + withHeader.sha.slice(0, 7) + " has an encoding header (" + withHeader.encoding + ") -- a re-signed commit would lose it; not supported");
+  }
   if (!flags.apply) {
     if (fromRoot) process.stdout.write("resign-commits: root-inclusive: " + toRewrite.length + " commits\n");
     for (const sha of toRewrite) {
@@ -1605,10 +1641,10 @@ var SYNOPSES = {
   "resign-commits": "git-sign resign-commits <repo> (<lower>..<upper> | <rev> --from-root) [--map-out=<file>] [--policy=<file>] [--apply]",
   check: "git-sign check <repo> [<range> | --range=<range>] [--tags] [--policy=<file>]"
 };
+var FOOTER = "Every writing subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md \xA7 5.";
 function usage() {
-  return "usage:\n" + Object.values(SYNOPSES).map((l) => "  " + l + "\n").join("") + "Every writing subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md \xA7 5.\n";
+  return "usage:\n" + Object.values(SYNOPSES).map((l) => "  " + l + "\n").join("") + FOOTER + "\n";
 }
-var HELP_WORDS = ["--help", "-h", "help"];
 var COMMANDS = {
   commit: cmdCommit,
   tag: cmdTag,
@@ -1623,14 +1659,7 @@ main("git-sign", (bin) => {
     process.stderr.write(bin + ": missing subcommand\n" + usage());
     process.exit(2);
   }
-  if (HELP_WORDS.includes(sub)) {
-    process.stdout.write(usage());
-    return;
-  }
+  if (printHelp(sub, rest, SYNOPSES, FOOTER)) return;
   if (!Object.hasOwn(COMMANDS, sub)) throw new UsageError("unknown subcommand '" + sub + "'");
-  if (rest.includes("--help") || rest.includes("-h")) {
-    process.stdout.write("usage: " + SYNOPSES[sub] + "\n");
-    return;
-  }
   return COMMANDS[sub](bin, rest);
 });

@@ -93,7 +93,7 @@ export interface RunBinOpts {
   env?: Record<string, string>;
   gnupgHome?: string;
   cwd?: string;
-  input?: string;
+  input?: string | Buffer;
   timeout?: number;
 }
 

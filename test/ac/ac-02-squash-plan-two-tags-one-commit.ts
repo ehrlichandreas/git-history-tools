@@ -37,6 +37,15 @@ if (gpg) {
     T.check('AC-02: each tag folds exactly 1 commit (the commit itself, nothing re-counted across tags)',
       /plan: v1\.0 folds 1 commit\(s\)/.test(r.stdout) && /plan: v1\.0\.1 folds 1 commit\(s\)/.test(r.stdout),
       r.stdout);
+
+    /* plan's own preview subject (the `into "..."` clause of its first
+     * line), not just apply's eventual commit, names v1.0 -- the first
+     * (refname-order) tag on the commit -- for BOTH tags' lines. */
+    T.check('AC-02: v1.0\'s plan line names v1.0 in the preview subject',
+      lines[iv1] !== undefined && / v1\.0: first release name"$/.test(lines[iv1]), JSON.stringify(lines[iv1]));
+    T.check('AC-02: v1.0.1\'s own line carries v1.0\'s subject, never its own',
+      lines[iv101] !== undefined && / v1\.0: first release name"$/.test(lines[iv101]) && !lines[iv101].includes('v1.0.1:'),
+      JSON.stringify(lines[iv101]));
   }
 
   const map = path.join(H.freshDir("ac02-map"), "ac02-map.txt");

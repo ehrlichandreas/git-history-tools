@@ -3,7 +3,6 @@
  * functions -- no git, no filesystem -- so they are equally usable against a
  * real blob's content or a synthetic one-line "blob" made of a rule's own
  * replacement text. */
-import { readFileSync } from 'node:fs';
 
 export interface Hit {
   category: string;
@@ -178,11 +177,11 @@ export function scanTerms(text: string, terms: string[]): Hit[] {
   return hits;
 }
 
-/** Parses a terms/allow-style file: one entry per line, blank/# lines
- * skipped. For terms, entries are lowercased (matching is case-insensitive);
- * for allow, entries are kept verbatim (matching is exact). */
-export function readLines(filePath: string, lowercase: boolean): string[] {
-  const raw = readFileSync(filePath, 'utf8');
+/** Parses a terms/allow-style file's text: one entry per line, blank/#
+ * lines skipped. For terms, entries are lowercased (matching is
+ * case-insensitive); for allow, entries are kept verbatim (matching is
+ * exact). */
+export function parseLines(raw: string, lowercase: boolean): string[] {
   const out: string[] = [];
   for (const line of raw.split('\n')) {
     const l = line.replace(/\r$/, '');

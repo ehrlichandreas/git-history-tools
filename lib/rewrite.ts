@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main } from './cli.ts';
+import { UsageError, Refusal, parseFlags, resolveOutsideFile, requireRepo, main, printHelp, readUserFile } from './cli.ts';
 import { refuseNonUtf8 } from './encoding.ts';
 import { createSigner, buildSignedTagObject } from './signer.ts';
 import { createBackupBundle } from './bundle.ts';
@@ -470,7 +470,7 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
 /* ------------------------------------------------------------- replace --- */
 
 function parseRulesFile(rulesPath: string): Rule[] {
-  const raw = fs.readFileSync(rulesPath, 'utf8');
+  const raw = readUserFile('--rules', rulesPath).toString('utf8');
   const lines = raw.split('\n');
   const rules: Rule[] = [];
   lines.forEach((line, i) => {
@@ -492,6 +492,7 @@ function cmdReplace(bin: string, args: string[]): void {
   const { positional, flags } = parseFlags(args, { valueFlags: ['--rules', '--hook'], boolFlags: ['--apply'] });
   const repo = positional[0];
   if (!repo) throw new UsageError('missing <repo>');
+  if (positional.length > 1) throw new UsageError('unexpected argument: ' + positional[1]);
   if (!flags.rules) throw new UsageError('missing --rules');
   requireRepo(repo);
   const env = process.env;
@@ -524,11 +525,12 @@ function cmdAddFile(bin: string, args: string[]): void {
   const srcPath = positional[1];
   if (!repo) throw new UsageError('missing <repo>');
   if (!srcPath) throw new UsageError('missing <path>');
+  if (positional.length > 2) throw new UsageError('unexpected argument: ' + positional[2]);
   if (!fs.existsSync(srcPath)) throw new UsageError('<path> does not exist: ' + srcPath);
   requireRepo(repo);
   const env = process.env;
 
-  const content = fs.readFileSync(srcPath);
+  const content = readUserFile('<path>', srcPath);
   const st = fs.statSync(srcPath);
   const mode = (st.mode & 0o111) !== 0 ? '100755' : '100644';
   const asPath = (flags.as as string) || path.basename(srcPath);
@@ -552,9 +554,17 @@ function cmdAddFile(bin: string, args: string[]): void {
   });
 }
 
+/** One synopsis per subcommand, as docs/SPECIFICATION.md § 3 lists them
+ * (`--help`, § 0; AC-100). */
+const SYNOPSES: Record<string, string> = {
+  replace: 'git-history-rewrite replace <repo> --rules <file> [--hook <script>] [--apply]',
+  'add-file': 'git-history-rewrite add-file <repo> <path> [--as <repo-path>] [--apply]',
+};
+
 main('git-history-rewrite', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
+  if (printHelp(sub, rest, SYNOPSES, 'Every subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md § 3.')) return;
   if (sub === undefined) throw new UsageError('missing subcommand (usage: ' + bin + ' replace|add-file <repo> ...)');
   if (sub === 'replace') return cmdReplace(bin, rest);
   if (sub === 'add-file') return cmdAddFile(bin, rest);

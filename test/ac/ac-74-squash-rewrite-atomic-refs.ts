@@ -55,7 +55,8 @@ for (const c of CASES) {
   const l = 'AC-74 [' + c.label + ', ' + c.lock + ' locked]';
   T.exit(l + ': a refusal, exit 1, not a crash', r, 1);
   T.check(l + ': one stderr line, the failed transaction', /^git-[a-z-]+: ref update transaction failed: .*\n$/.test(r.stderr), r.stderr);
-  T.eq(l + ': nothing on stdout', r.stdout, '');
+  { const b = H.findBackupBundle(repo);
+    T.eq(l + ': stdout is only the backup line (§ 4.1, D23)', r.stdout, b ? 'backup: ' + fs.realpathSync(b) + '\n' : '(no bundle)'); }
   T.eq(l + ': NO ref moved, not even the ones before the locked one', H.gitRaw(repo, gpg, ['for-each-ref']), refsBefore);
   T.check(l + ': the backup bundle exists', H.findBackupBundle(repo) !== null);
 

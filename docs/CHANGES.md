@@ -3,6 +3,50 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.5
+
+- Fix: `git-release-squash tail` dates its new commit by its position
+  in the history, as § 4.3 says. With an untagged commit before the
+  last tag it used to get a date one day per such commit too early,
+  as early as its parent's slot.
+- New: `--help` (also `-h`, `help`) on every tool, and `<subcommand>
+  --help`, as git-sign already had.
+- Fix: an extra positional argument is a usage error in
+  git-release-squash, git-history-rewrite and git-leak-scan, as in
+  git-sign. It used to be ignored.
+- Fix: a `--message-file`, `--rules`, `--terms`, `--allow` or add-file
+  `<path>` that is missing, a directory or unreadable is a one-line
+  usage error (exit 2) instead of a stack trace.
+- Change: every `--apply` that writes a backup bundle prints `backup:
+  <path>` as its first stdout line, also when a refusal follows. A
+  script that expected no stdout from such a refusal sees this line.
+- Fix: `git-release-squash plan` prints what § 1.1 says: the subject
+  `apply` writes (`<name> <tag>: <title>`), the preview sha of the new
+  squash commit instead of the tag object's, and a tree check that is
+  computed. A tag message whose first two lines are not separated by a
+  blank line no longer has them joined into one title, and `apply`, which
+  also stored the tag message with those two lines joined, now keeps the
+  message as it was. A title has no CR (from a CRLF message) or other
+  control character, in `plan`, `apply` and `tail`. A CRLF tag message
+  that `apply` re-creates loses its CRs, as `git tag`'s default cleanup
+  always made it.
+- Fix: a `--message-file` (`tail --tag`, git-sign `commit`/`tag`) that is
+  not valid UTF-8 is a one-line usage error (exit 2) instead of being
+  written with U+FFFD in place of its bytes.
+- Fix: in a repository with `i18n.commitEncoding` set to anything but
+  UTF-8, the commits `apply`, `tail`, `replace` and git-sign `commit`
+  wrote carried that `encoding` header over UTF-8 bytes; `replace` also
+  re-encoded each message, and `resign-commits` failed its own verify
+  after moving the ref. ght's commits now never have an `encoding`
+  header, and messages are read as UTF-8, also by `git-leak-scan scan`
+  and `git-sign check`, which missed a UTF-8 term or pattern in a repo
+  with `i18n.logOutputEncoding` set.
+- Fix: `resign-commits` over a commit with an explicit `encoding UTF-8`
+  header moved the ref, then failed its "headers preserved" verify
+  (exit 1). It now refuses such a commit before anything is written,
+  dry run included (exit 1, one stderr line). `replace` drops the header
+  and keeps the message bytes.
+
 ## 0.4.4
 
 - Change: `git-leak-scan` finds more secret shapes. These include

@@ -49,7 +49,8 @@ for (const [label, ref, action] of CASES) {
   T.exit(l + ': a refusal, exit 1', r, 1);
   T.check(l + ': one stderr line naming the ref', r.stderr.split('\n').length === 2 &&
     r.stderr.startsWith('git-history-rewrite: refs changed during the run (') && r.stderr.includes(ref), r.stderr);
-  T.eq(l + ': nothing on stdout', r.stdout, '');
+  { const b = H.findBackupBundle(repo);
+    T.eq(l + ': stdout is only the backup line (§ 4.1, D23)', r.stdout, b ? 'backup: ' + fs.realpathSync(b) + '\n' : '(no bundle)'); }
   /* What the hook left is what stays: the bundle holds the pre-run refs,
    * and the refs now are exactly the bundle's plus the hook's change. */
   const bundle = H.findBackupBundle(repo);

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as git from './git.ts';
-import { UsageError, Refusal, parseFlags, isInsideRepo, requireRepo, main } from './cli.ts';
+import { UsageError, Refusal, parseFlags, isInsideRepo, requireRepo, main, printHelp, readUserFile, decodeUserText } from './cli.ts';
 import { refuseNonUtf8 } from './encoding.ts';
 import { createSigner, keyCreationTime, buildSignedTagObject, signableTagMessage, PIN_OTHER_SIGNERS } from './signer.ts';
 import { createBackupBundle } from './bundle.ts';
@@ -124,7 +124,7 @@ function resolveMessage(flags: Flags): string {
   if (hasMessage === hasMessageFile) throw new UsageError('exactly one of --message or --message-file is required');
   if (hasMessage) return flags.message as string;
   const file = flags['message-file'] as string;
-  return file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(file, 'utf8');
+  return decodeUserText('--message-file', file, file === '-' ? fs.readFileSync(0) : readUserFile('--message-file', file));
 }
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(Z|[+-]\d{2}:?\d{2})?$/;
@@ -797,6 +797,8 @@ interface ParsedCommit {
   committerIdent: { name: string; email: string };
   committerDate: string;
   committerEpoch: number;
+  /** The value of its `encoding` header, null when it has none. */
+  encoding: string | null;
 }
 
 /** Parses the one commit `sha` needs re-signed: tree, parent(s), and the
@@ -818,11 +820,14 @@ function parseCommitForResign(repo: string, env: Env, sha: string): ParsedCommit
   const am = /^author (.*) (\d+) ([+-]\d{4})$/m.exec(raw);
   const cm = /^committer (.*) (\d+) ([+-]\d{4})$/m.exec(raw);
   if (!am || !cm) throw new Refusal(sha.slice(0, 7) + ': malformed commit, missing author/committer line');
+  const end = raw.indexOf('\n\n');
+  const em = /^encoding (.*)$/m.exec(end < 0 ? raw : raw.slice(0, end));
   return {
     sha, tree: treeM[1], parents,
     authorIdent: splitIdent(am[1]), authorDate: '@' + am[2] + ' ' + am[3],
     committerIdent: splitIdent(cm[1]), committerDate: '@' + cm[2] + ' ' + cm[3],
     committerEpoch: parseInt(cm[2], 10),
+    encoding: em ? em[1] : null,
   };
 }
 
@@ -1035,6 +1040,14 @@ function cmdResignCommits(bin: string, args: string[]): void {
     ...toRewrite.map((c) => ({ sha: c, label: 'commit ' + c.slice(0, 7) })),
     ...affectedTags.filter((t) => t.type === 'tag').map((t) => ({ sha: t.obj, label: 'tag ' + t.name })),
   ]);
+  /* A UTF-8 `encoding` header (any other is refused above): the re-signed
+   * commit is written without one (D23), so it would differ in more than
+   * its signature. Refused before anything is written (D20, AC-107). */
+  const withHeader = parsed.find((p) => p.encoding !== null);
+  if (withHeader) {
+    throw new Refusal('commit ' + withHeader.sha.slice(0, 7) + ' has an encoding header (' + withHeader.encoding +
+      ') -- a re-signed commit would lose it; not supported');
+  }
 
   if (!flags.apply) {
     if (fromRoot) process.stdout.write('resign-commits: root-inclusive: ' + toRewrite.length + ' commits\n');
@@ -1298,12 +1311,12 @@ const SYNOPSES: Record<string, string> = {
   check: 'git-sign check <repo> [<range> | --range=<range>] [--tags] [--policy=<file>]',
 };
 
+const FOOTER = 'Every writing subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md § 5.';
+
 function usage(): string {
-  return 'usage:\n' + Object.values(SYNOPSES).map((l) => '  ' + l + '\n').join('') +
-    'Every writing subcommand is a dry run unless --apply is given. See docs/SPECIFICATION.md § 5.\n';
+  return 'usage:\n' + Object.values(SYNOPSES).map((l) => '  ' + l + '\n').join('') + FOOTER + '\n';
 }
 
-const HELP_WORDS = ['--help', '-h', 'help'];
 const COMMANDS: Record<string, (bin: string, args: string[]) => void> = {
   commit: cmdCommit, tag: cmdTag, 'resign-tags': cmdResignTags, check: cmdCheck, 'resign-commits': cmdResignCommits,
 };
@@ -1315,16 +1328,7 @@ main('git-sign', (bin) => {
     process.stderr.write(bin + ': missing subcommand\n' + usage());
     process.exit(2);
   }
-  if (HELP_WORDS.includes(sub)) {
-    process.stdout.write(usage());
-    return;
-  }
+  if (printHelp(sub, rest, SYNOPSES, FOOTER)) return;
   if (!Object.hasOwn(COMMANDS, sub)) throw new UsageError('unknown subcommand \'' + sub + '\'');
-  /* `git-sign <sub> --help`: that subcommand's synopsis only, before any
-   * flag parsing (so it never fails on the other arguments around it). */
-  if (rest.includes('--help') || rest.includes('-h')) {
-    process.stdout.write('usage: ' + SYNOPSES[sub] + '\n');
-    return;
-  }
   return COMMANDS[sub](bin, rest);
 });

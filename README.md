@@ -18,7 +18,7 @@ signed:
   read-only pre-push gate for identity, signature, forbidden time windows and
   forbidden message patterns (e.g. AI attribution lines). Identity, the
   signing key and the gpg binary come from a policy file, never from git
-  config. `git-sign --help` lists every subcommand.
+  config.
   Careful: `resign-commits <repo> <rev> --from-root` (a revision without
   `..`) re-signs every ancestor down to the root -- usually the whole
   history, which is why it refuses to run without `--from-root`; for the
@@ -27,7 +27,10 @@ signed:
 Every writing command is a dry run unless `--apply` is given. Commands that
 rewrite existing history (`git-release-squash apply`/`tail`,
 `git-history-rewrite`, `git-sign resign-tags`/`resign-commits`) write a
-backup bundle first and verify the result afterwards. Nothing is ever pushed.
+backup bundle first, print `backup: <path>`, and verify the result
+afterwards. Nothing is ever pushed. Every tool prints its subcommands'
+synopses with `--help` (also `-h`, `help`), and `<tool> <subcommand>
+--help` just that one.
 
 Requirements: Node.js ≥ 24, git and gpg. Every `--apply` of
 git-release-squash and git-history-rewrite signs the commits and tags it
