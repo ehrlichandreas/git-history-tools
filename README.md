@@ -12,12 +12,25 @@ signed:
   messages and identities.
 - **git-history-rewrite** (`bin/git-history-rewrite`): replace text in, or add a file
   (e.g. a LICENSE) to, every commit.
+- **git-sign** (`bin/git-sign`): policy-enforcing `commit`/`tag`,
+  `resign-tags`/`resign-commits` to re-sign existing tags or a whole commit
+  range without touching anything but the signatures, and `check` -- a
+  read-only pre-push gate for identity, signature, forbidden time windows and
+  forbidden message patterns (e.g. AI attribution lines). Identity, the
+  signing key and the gpg binary come from a policy file, never from git
+  config. `git-sign --help` lists every subcommand.
+  Careful: `resign-commits <repo> <rev> --from-root` (a revision without
+  `..`) re-signs every ancestor down to the root -- usually the whole
+  history, which is why it refuses to run without `--from-root`; for the
+  last N commits use `HEAD~N..HEAD`.
 
-Every writing command is a dry run unless `--apply` is given. `--apply`
-writes a backup bundle first and verifies the result afterwards. Nothing is
-ever pushed.
+Every writing command is a dry run unless `--apply` is given. Commands that
+rewrite existing history (`git-release-squash apply`/`tail`,
+`git-history-rewrite`, `git-sign resign-tags`/`resign-commits`) write a
+backup bundle first and verify the result afterwards. Nothing is ever pushed.
 
-Requirements: Node.js ≥ 24 and git, plus gpg if the commits are signed.
+Requirements: Node.js ≥ 24 and git, plus gpg (always for git-sign; for the
+other tools only if the commits are signed).
 There are no other dependencies.
 
 ```sh
@@ -27,7 +40,8 @@ sh bin/git-release-squash tail ../my-repo --name=my-repo --tag=v1.0 --message="f
 ```
 
 Usage details are in [SKILL.md](SKILL.md) and the full contract is in
-[docs/SPECIFICATION.md](docs/SPECIFICATION.md). Run the tests with
+[docs/SPECIFICATION.md](docs/SPECIFICATION.md); what changed in each release
+is in [docs/CHANGES.md](docs/CHANGES.md). Run the tests with
 `node test/run-all.ts`.
 
 **v0.2.0** renamed the `ght-squash`/`ght-scan`/`ght-rewrite` commands to
@@ -35,6 +49,7 @@ Usage details are in [SKILL.md](SKILL.md) and the full contract is in
 with `git-` (`git-release-squash`/`git-leak-scan`/`git-history-rewrite`) so
 each one also works as a `git` subcommand (`git release-squash`, `git
 leak-scan`, `git history-rewrite`) — see [docs/MIGRATION.md](docs/MIGRATION.md)
-for the full old→new mapping.
+for the full old→new mapping. **v0.4.0** adds `git-sign`, with a policy file
+at `docs/policy.example.json` showing the expected shape.
 
 License: MIT.

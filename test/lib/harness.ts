@@ -195,6 +195,59 @@ export function initRepo(label: string | undefined, gpg: Gpg): string {
   return dir;
 }
 
+/**
+ * A fresh git repo under /tmp with no signing configuration at all -- no
+ * user.signingkey, no gpg.program override, commit.gpgsign/tag.gpgsign
+ * explicitly false. git-sign (unlike the other three tools) must never need
+ * or write persisted repo config for identity/key; a fixture built with
+ * initRepo() instead would hide a regression where git-sign silently fell
+ * back to the repo's own configured signing key. user.name/user.email are
+ * still set -- harness commit() (building pre-existing history for a test
+ * to layer git-sign on top of) relies on them, same as any ordinary repo.
+ */
+export function initRepoNoSignConfig(label: string | undefined, gpg: Gpg): string {
+  const dir = freshDir(label || 'repo');
+  const git = (args: string[]) => spawnSync('git', args, { cwd: dir, env: gpg.env, encoding: 'utf8' });
+  git(['init', '-q', '-b', 'main']);
+  git(['config', 'user.email', FIXTURE_EMAIL]);
+  git(['config', 'user.name', 'GHT Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  git(['config', 'tag.gpgsign', 'false']);
+  return dir;
+}
+
+export interface PolicyFixtureOpts {
+  identity?: { name: string; email: string };
+  signingKey?: string;
+  timezone?: string;
+  forbiddenWindows?: { days: string[]; from: string; to: string }[];
+  forbiddenMessagePatterns?: string[];
+  anonymousBefore?: string;
+  gpgProgram?: string;
+}
+
+/** A policy.json fixture, written under its own freshDir() -- always
+ * outside any fixture repo (every repo is itself a separate freshDir()),
+ * satisfying § 4.4's outside-the-repo rule by construction. Defaults: UTC,
+ * no forbidden windows/patterns, no `anonymousBefore` (the optional key
+ * is only written when a test actually passes it), so a test only names
+ * what it actually exercises. */
+export function writePolicy(label: string | undefined, opts: PolicyFixtureOpts): string {
+  const dir = freshDir(label || 'policy');
+  const file = path.join(dir, 'policy.json');
+  const policy: Record<string, unknown> = {
+    identity: opts.identity || { name: 'GHT Test', email: FIXTURE_EMAIL },
+    signingKey: opts.signingKey || '0'.repeat(40),
+    timezone: opts.timezone || 'UTC',
+    forbiddenWindows: opts.forbiddenWindows || [],
+    forbiddenMessagePatterns: opts.forbiddenMessagePatterns || [],
+  };
+  if (opts.anonymousBefore !== undefined) policy.anonymousBefore = opts.anonymousBefore;
+  if (opts.gpgProgram !== undefined) policy.gpgProgram = opts.gpgProgram;
+  fs.writeFileSync(file, JSON.stringify(policy, null, 2));
+  return file;
+}
+
 export function gitIn(repo: string, gpg: Gpg) {
   return (args: string[], opts?: Record<string, unknown>) =>
     spawnSync('git', args, Object.assign({ cwd: repo, env: gpg.env, encoding: 'utf8' as const }, opts || {}));

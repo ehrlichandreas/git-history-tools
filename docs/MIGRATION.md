@@ -51,3 +51,37 @@ Error messages printed by each tool are prefixed with its own command name
 (e.g. `git-release-squash: HEAD is not tagged -- run 'tail' first`) — a
 script that greps for the old prefix (`release-squash: `, `leak-scan: `,
 `history-rewrite: `) needs updating too.
+
+# Migrating from v0.3 to v0.4
+
+v0.4.0 adds `git-sign` and keeps the three existing commands' names, flags
+and output — with one exception, in the flag parser all four tools share
+(D17).
+
+A value flag still takes its value either as `--flag=<value>` or as the next
+argument (`--flag <value>`). What changed: in the space-separated form, a
+next argument that itself starts with `--` is no longer taken as the value.
+It used to be, silently — `git-leak-scan scan <repo> --terms --allow <f>`
+read `--allow` as the terms file and never saw an allowlist;
+`git-release-squash tail <repo> --tag=v1 --message --apply` made `--apply`
+the tag message and stayed a dry run. Both are now the usage error
+`<bin>: missing value for --terms` / `--message` (exit 2), nothing done.
+
+Affected value flags: `--name`, `--map`, `--dates`, `--tag`, `--message`,
+`--message-file` (`git-release-squash`); `--terms`, `--allow`
+(`git-leak-scan`); `--rules`, `--hook`, `--as` (`git-history-rewrite`).
+
+What a caller has to change:
+
+- A call that left a value flag's value out by mistake now fails with exit
+  2 instead of misreading the next flag — give the value.
+- A value that really starts with `--` (a message such as `--apply`, a path
+  such as `--odd-name`) must be written as `--flag=<value>`:
+  `--message=--apply`. `--flag=<value>` works for every value, so scripts
+  that always use it need no change at all.
+- A script that treated exit 0/1 as the only outcomes of these calls should
+  expect exit 2 (usage error, nothing changed) here, as for any other bad
+  flag.
+
+`git-sign` is new in v0.4.0 and has no earlier public form, so nothing about
+it needs migrating.

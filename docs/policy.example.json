@@ -1,0 +1,14 @@
+{
+  "identity": { "name": "Your Name", "email": "you@example.com" },
+  "signingKey": "0123456789ABCDEF0123456789ABCDEF01234567",
+  "timezone": "Europe/Berlin",
+  "forbiddenWindows": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "from": "07:00", "to": "19:00" }
+  ],
+  "forbiddenMessagePatterns": [
+    "Co-Authored-By: Claude",
+    "Generated with \\[Claude Code\\]",
+    "noreply@anthropic\\.com"
+  ],
+  "anonymousBefore": "1971-01-01T00:00:00Z"
+}

@@ -1,5 +1,5 @@
 /* Shared CLI plumbing: usage errors (exit 2) vs refusals (exit 1), and a
- * small flag parser used by all three bin entry points. */
+ * small flag parser used by all four bin entry points. */
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -17,7 +17,8 @@ export interface ParsedFlags {
 }
 
 /**
- * Parses `--flag=value` / `--flag value` / `--bool-flag` style args.
+ * Parses `--flag=value` / `--flag value` / `--bool-flag` style args (a
+ * space-separated value may not itself start with `--`).
  * spec: { valueFlags: ['--map', '--name', ...], boolFlags: ['--apply', ...] }
  * Returns { positional: [...], flags: {name: value-or-true} }.
  * Throws UsageError on an unrecognised flag or a value flag missing its value.
@@ -35,7 +36,15 @@ export function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
       if (valueFlags.has(name)) {
         let value: string | undefined;
         if (eq !== -1) value = a.slice(eq + 1);
-        else { i++; value = args[i]; }
+        else {
+          i++;
+          value = args[i];
+          /* `--message --apply` must not silently take `--apply` as the
+           * message (and so quietly drop the flag): a space-separated value
+           * that is itself a flag is a missing value. `--message=--x` still
+           * passes a value starting with `--` explicitly. */
+          if (value !== undefined && value.startsWith('--')) value = undefined;
+        }
         if (value === undefined) throw new UsageError('missing value for ' + name);
         flags[name.slice(2)] = value;
       } else if (boolFlags.has(name)) {
@@ -62,7 +71,7 @@ export function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
  * - every symlink fully resolved, including the final segment -- catches
  *   a symlink living outside the repo (so the first check alone sees it as
  *   outside) whose target is itself inside the repo. */
-function isInsideRepo(realRepo: string, candidate: string): boolean {
+export function isInsideRepo(realRepo: string, candidate: string): boolean {
   const rel = path.relative(realRepo, candidate);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }

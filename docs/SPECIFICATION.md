@@ -1,4 +1,4 @@
-# Specification — git-history-tools v0.3
+# Specification — git-history-tools v0.4
 
 This is the precise CLI contract. docs/DECISIONS.md D1 is the scope and shape;
 this document pins the exact arguments, output lines, exit codes and refusals
@@ -8,13 +8,25 @@ implementation that disagrees is wrong, not the test.
 
 ## 0. Conventions
 
-- Layout: `SKILL.md`, `bin/git-release-squash`, `bin/git-leak-scan`, `bin/git-history-rewrite`
-  (POSIX `sh` wrappers, `exec node "$(dirname "$0")/../lib/<name>.ts" "$@"`),
+- Layout: `SKILL.md`, `bin/git-release-squash`, `bin/git-leak-scan`, `bin/git-history-rewrite`,
+  `bin/git-sign` (POSIX `sh` wrappers that resolve their own path through
+  any symlinks, then `exec node "<dir>/../lib/<name>.ts" "$@"`, D6),
   `lib/*.ts`. Node.js ≥ 24, no runtime dependencies (D1).
 - Every tool is invoked as `<bin> <subcommand> [args...]`. An unknown
   subcommand, a missing required argument, or an unknown flag is a **usage
   error**: exit 2, one line on stderr, `<bin-basename>: <reason>` (e.g.
   `git-release-squash: unknown subcommand 'plna'`), nothing on stdout.
+- A value flag takes its value as `--flag=<value>` or as the next argument
+  (`--flag <value>`); in the space-separated form, a next argument that
+  itself starts with `--` is never taken as the value — `--message --apply`
+  is the usage error `<bin>: missing value for --message` rather than a
+  message reading "--apply" and a silently dropped `--apply` (D17). A value
+  that really starts with `--` is passed as `--flag=--value`.
+- git-sign alone has a help form (§ 5): `git-sign --help`/`-h`/`help` prints
+  the synopsis of every subcommand on stdout, exit 0; `git-sign <sub>
+  --help` (or `-h`) prints `usage: <that synopsis>`, exit 0; no subcommand
+  at all is a usage error whose `git-sign: missing subcommand` line is
+  followed by the same synopses on stderr (D17).
 - A **refusal** (a precondition the repo itself fails, not a CLI mistake) is
   exit 1, one line on stderr in the same `<bin-basename>: <reason>` form,
   nothing on stdout, and the repo is left byte-for-byte unchanged — no ref
@@ -38,9 +50,11 @@ implementation that disagrees is wrong, not the test.
   `(no title)`.
 - **(decision)** Every writing subcommand (`git-release-squash apply`,
   `git-release-squash tail`, `git-history-rewrite replace`, `git-history-rewrite
-  add-file`) is a dry run unless `--apply` is given (D1's shared rule,
+  add-file`, `git-sign commit`/`tag`/`resign-tags`/`resign-commits`) is a dry
+  run unless `--apply` is given (D1's shared rule,
   applied uniformly): without `--apply` it prints exactly the same report
-  it would with `--apply`, changes no ref, creates no bundle, and exits 0.
+  it would with `--apply` (git-sign's minus the new shas, which a dry run
+  cannot know, § 5.1/§ 5.5), changes no ref, creates no bundle, and exits 0.
   `git-release-squash plan` has no writing mode at all; giving it `--apply` is
   a usage error (exit 2).
 - **(D2)** A dry run writes no git objects either, not just no ref: every
@@ -357,6 +371,28 @@ bundle's existence and `git bundle verify`-cleanliness are asserted by
 tests; its exact byte content is not (bundles are not reproducible byte
 output, only a restorable snapshot).
 
+**Restore recipe (D14, tested).** `git fetch <bundle> 'refs/*:refs/*'` is
+refused outright while the repo's HEAD is checked out on a branch the
+fetch would overwrite (`fatal: refusing to fetch into branch '<ref>'
+checked out at '<path>'`) — detach HEAD first:
+
+```
+git -C <repo> checkout --detach HEAD
+git -C <repo> fetch <bundle-path> 'refs/*:refs/*' --force
+git -C <repo> checkout <branch-you-want>   # re-attach HEAD somewhere sane
+```
+
+This restores every ref the bundle captured (every branch and tag, since
+it was created with `--all`) to exactly its pre-rewrite state, in place,
+in the SAME repo. To inspect the bundle's contents instead, without
+touching the live repo at all: `git clone --mirror <bundle-path>
+<scratch-dir>` works with no detach needed (a fresh clone has no
+checked-out branch to conflict with) — but pushing FROM that mirror INTO
+the original repo hits the identical "checked out branch" refusal from
+the receiving end (`remote: error: refusing to update checked out
+branch`), so restoring in place is still the fetch-after-detach recipe
+above, not a push from a mirror.
+
 ### 4.2 Verification
 
 After every `--apply` write (never during a dry run, which has nothing to
@@ -367,8 +403,11 @@ verify), in this order, each printed as `verify: <check>: OK` or `verify:
    corresponding pre-rewrite tree it is supposed to preserve (the tagged
    commit's tree for squash, the rule-rewritten tree for replace/add-file)
    — nothing else changed.
-2. `signatures` — every commit and annotated tag reachable from any ref
-   has a signature `git verify-commit`/`git verify-tag` accepts.
+2. `signatures` — every commit and annotated tag reachable from any local
+   branch or tag (`refs/heads/*`, `refs/tags/*` -- **not**
+   `refs/remotes/*`, which `apply`/`tail`/`replace`/`add-file` never touch
+   and may still point at pre-rewrite history) has a signature `git
+   verify-commit`/`git verify-tag` accepts.
 3. `squash: every commit tagged` — (git-release-squash `apply` only; skipped,
    not printed, for `tail`/`replace`/`add-file`) every commit reachable
    from HEAD has at least one tag pointing at it.
@@ -419,7 +458,510 @@ warning that still proceeds — a rules/terms file that lives inside the
 repo would otherwise get committed the next time the repo's own history
 is rewritten, which is exactly the leak this whole tool exists to prevent.
 
-## 5. Acceptance criteria
+## 5. git-sign (`bin/git-sign`)
+
+Unlike the other three tools, git-sign never reads or writes `user.signingkey`,
+`user.name`/`user.email` in `<repo>`'s own git config (D8), and never reads
+`gpg.program` from ANY git config — repo, global, system or
+`GIT_CONFIG_*` (D17): identity, the signing key and the gpg binary all come
+from the **policy file** (below; the gpg binary is its optional
+`gpgProgram`, default `gpg` from `PATH`). They reach git only as
+`GIT_AUTHOR_*`/`GIT_COMMITTER_*` environment variables, `-c
+user.signingkey=<key>` / `-c gpg.program=<wrapper>` on the one invocation that
+signs, and a `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`
+override of `gpg.program` on every `git verify-commit`/`verify-tag`/`tag -v`
+git-sign runs, so a repo's own `gpg.program` is never executed — nothing
+persists in `<repo>/.git/config`.
+
+Synopses (`git-sign --help`, § 0):
+
+```
+git-sign commit <repo> (--message=<text>|--message-file=<path>) --date=(auto|<date>) [--amend] [--policy=<file>] [--apply]
+git-sign tag <repo> <tag> (--message=<text>|--message-file=<path>) --date=(auto|<date>) [--policy=<file>] [--apply]
+git-sign resign-tags <repo> [<tag> ...] [--policy=<file>] [--apply]
+git-sign resign-commits <repo> (<lower>..<upper> | <rev> --from-root) [--map-out=<file>] [--policy=<file>] [--apply]
+git-sign check <repo> [<range> | --range=<range>] [--tags] [--policy=<file>]
+```
+
+### 5.0 The policy file
+
+A JSON file, resolved in this order: `--policy=<file>`, else
+`$XDG_CONFIG_HOME/git-history-tools/policy.json`, else
+`$HOME/.config/git-history-tools/policy.json`. It must live outside `<repo>`
+(§ 4.4's rule, reused as-is). A missing, unreadable, non-JSON, or
+schema-invalid policy is a **refusal** naming the file and the specific
+problem — never a usage error, since the default location legitimately may
+not exist yet and this is a repo-independent precondition, not a CLI mistake.
+
+Schema (every key required except `anonymousBefore` and `gpgProgram`, no unknown key
+accepted anywhere in the document — a typo is a refusal, not a silently
+ignored key):
+
+```json
+{
+  "identity": { "name": "Your Name", "email": "you@example.com" },
+  "signingKey": "0123456789ABCDEF0123456789ABCDEF01234567",
+  "timezone": "Europe/Berlin",
+  "forbiddenWindows": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "from": "07:00", "to": "19:00" }
+  ],
+  "forbiddenMessagePatterns": [
+    "Co-Authored-By: Claude",
+    "Generated with \\[Claude Code\\]",
+    "noreply@anthropic\\.com"
+  ],
+  "anonymousBefore": "1971-01-01T00:00:00Z"
+}
+```
+
+- `identity.name`/`identity.email`: non-empty strings.
+- `signingKey`: a 16-40 character hex key id/fingerprint.
+- `timezone`: an IANA zone name valid for `Intl.DateTimeFormat`. Every
+  forbidden-window and forbidden-instant check below is evaluated in this
+  zone (DST-aware), regardless of any offset embedded in a git timestamp
+  being checked — a UTC+2 commit timestamp is still checked against the
+  policy's own Europe/Berlin wall-clock time, not its own recorded offset.
+- `forbiddenWindows`: an array (may be empty) of `{days, from, to}`; `days`
+  is a non-empty array of distinct `mon`/`tue`/`wed`/`thu`/`fri`/`sat`/`sun`;
+  `from`/`to` are `HH:MM`, `from` strictly before `to`. An instant is
+  forbidden when its zoned weekday is in some window's `days` and its zoned
+  `HH:MM` falls in `[from, to)`. A window cannot span midnight: split
+  `22:00`–`06:00` into two windows (`22:00`–`23:59` on the first day,
+  `00:00`–`06:00` on the next). Since `to` is exclusive and at most `23:59`,
+  the minute 23:59 itself is never forbidden.
+- `forbiddenMessagePatterns`: an array (may be empty) of strings, each a
+  JavaScript regular expression source (`new RegExp(pattern, 'i')` —
+  **case-insensitive**, so a policy author does not have to anticipate
+  every casing variant by hand; GitHub's own trailer is lowercase
+  `Co-authored-by:`, a different case from the example above — escape
+  metacharacters that are meant literally, as `\\[`/`\\]` above). A regex
+  that fails to compile is a policy refusal at load time, naming the bad
+  pattern, not a later surprise mid-command.
+- `anonymousBefore` (optional): an ISO date string. An author/committer/
+  tagger date strictly before it is exempt from the `forbiddenWindows`
+  check ONLY — git-release-squash's own anonymous placeholder dates (e.g.
+  `1970-01-26 12:00:00 +0000`) are not real working hours, and `check`
+  would otherwise flag every single one. Identity and message are never
+  exempt. The signature's own creation time (§ 5.4's `sig-time`) is never
+  simply skipped either — an anonymised object's signature is always made
+  in real time — but it switches from the window rule to the stricter D1
+  pin-exactness rule (§ 5.4, D10). Omitted: exempts nothing (and `sig-time`
+  always uses the window rule).
+- `gpgProgram` (optional, D17): the gpg binary every git-sign command runs
+  — for signing and for every verification, including the gpg that git's
+  own `verify-commit`/`verify-tag`/`tag -v` start on git-sign's behalf.
+  An absolute path to an existing, executable regular file; anything else
+  is a refusal naming the problem (`'gpgProgram' must be an absolute path
+  (got <json>)`, `does not exist: <p>`, `is not a file: <p>`, `is not
+  executable: <p>`). Omitted: `gpg` from `PATH`. `gpg.program` in git
+  config is never consulted either way (§ 5).
+
+### 5.1 `commit <repo> (--message=<text>|--message-file=<path>) --date=(auto|<date>) [--amend] [--policy=<file>] [--apply]`
+
+Commits the current index (exactly what `git commit` would commit) with the
+policy's identity, signed by the policy's key, dated per `--date`.
+`--message-file=-` reads stdin. Refuses, before anything is written, in this
+order: the message matches a `forbiddenMessagePatterns` entry (naming it);
+the resolved `--date` falls in a forbidden window, or is not strictly after
+the parent commit's own committer date (`is not after the parent's
+committer date (<date>)`; the current HEAD, or — with
+`--amend` — HEAD's own parent, since amending replaces HEAD and its real
+parent becomes HEAD^; either may not exist, for an initial commit or an
+amended root commit, in which case there is no lower bound at all).
+
+`--date=<date>`: `YYYY-MM-DD[T ]HH:MM[:SS]` optionally followed by `Z` or a
+`+HH:MM`/`+HHMM` offset; without an offset, the wall-clock time is read in
+the policy's own timezone — and if that wall-clock time does not exist
+(a spring-forward DST gap) or occurs twice (a fall-back repeated hour),
+a refusal naming the time, the zone, and the candidate offset(s), rather
+than silently shifting by an hour or picking one arbitrarily (D12); give
+an explicit offset to sidestep the zone lookup entirely. `--date=auto`:
+the latest allowed minute at or before now, strictly after the lower
+bound above; if none exists in that range — the whole gap is one
+forbidden window, or the lower bound itself lies within the current
+minute (e.g. `tag --date=auto` right after a `commit --date=auto` in the
+same minute) — a refusal naming the next allowed minute instead of
+silently picking something later than "now"; wait for it or pass an
+explicit `--date`.
+
+The **signature time** (`signTimeFor`, `lib/policy.ts`, shared by every
+signing command) is the chosen date itself, UNLESS that predates the
+signing key's own creation, in which case it is clamped up to the first
+policy-ALLOWED minute at or after `created + 60s` — never the raw
+`created + 60s` instant itself, which can itself fall inside a forbidden
+window (D1's original rule, generalized twice: first to the later of the
+chosen date and `created + 60s`, since an anonymised-1970 commit and a
+real dated one need different floors; then, D13, from the raw pin to the
+first allowed minute at or after it, so the clamp itself can never
+produce a `check` violation). A date exempted by `anonymousBefore` is
+pinned to `created + 60s` EXACTLY instead (D10), unaffected by D13.
+
+Without `--apply`: prints the resolved identity, date (with its zone
+offset), key, and signature time; exits 0; writes nothing — not even a
+preview commit sha (unlike squash/rewrite's `plan`, there is no no-write
+form of `commit-tree`/`git commit`, so a dry run honestly cannot show one;
+D2's actual requirement, no objects written, still holds).
+
+With `--apply`: creates the commit (via `git commit [--amend] -S
+--author=<name> <email> --date=<date>`, env vars carrying the same values —
+`--author`/`--date` are passed explicitly on the command line, not only as
+env vars, because `git commit --amend` otherwise silently keeps the
+*original* commit's author name/email/date regardless of
+`GIT_AUTHOR_*` **(decision)**); prints the same resolved-values report plus
+`sign: commit <short-sha>`.
+
+### 5.2 `tag <repo> <tag> (--message=<text>|--message-file=<path>) --date=(auto|<date>) [--policy=<file>] [--apply]`
+
+Same message/date/signature-time rules as `commit` § 5.1, targeting HEAD
+(the lower bound for `--date`/`auto` is HEAD's own committer date, since a
+tag has no parent chain of its own; the refusal says so: `is not after the
+target's committer date (<date>)`). Refuses if `<tag>` already exists:
+`git-sign: tag <tag> already exists -- use resign-tags to re-sign it`
+(no `--force`; that is `resign-tags`'s job, § 5.3). Dry run / `--apply`
+reporting follows `commit`'s shape, substituting `sign: tag <tag>` for
+`sign: commit <sha>`.
+
+### 5.3 `resign-tags <repo> [<tag> ...] [--policy=<file>] [--apply]`
+
+Re-signs annotated tags, changing nothing but the signature. Without
+`<tag>` arguments: every annotated tag NOT already validly signed by
+`policy.signingKey` (idempotent — a second run with no arguments finds
+nothing left to fix). With one or more `<tag>` arguments: exactly those
+tags, even if already validly signed by the policy key. A lightweight tag,
+named explicitly or reached by the default selection, is skipped and
+reported (`resign-tags: <tag> is lightweight, skipped`), never an error — it
+has no signature to re-sign. A named tag that does not exist is a usage
+error (exit 2), naming it.
+
+With `--apply`: creates the backup bundle first (§ 4.1, reused); for each
+selected tag, re-creates it with the identical target commit, tagger line
+(name/email/date, byte-identical), and message — only the embedded signature
+differs — at signature time per the shared `signTimeFor` rule (§ 5.1/D13):
+the tagger date itself, or, if that predates the signing key, the first
+policy-allowed minute at or after `created + 60s` (never the raw pin,
+which could itself fall inside a forbidden window).
+
+**(decision, D14 follow-up; D16/D18 revise the boundary)** The message
+used to re-create a tag is read from the RAW object (`git cat-file -p`),
+everything after the header's blank-line separator, truncated at the
+boundary `tagSignatureBoundary` (siginfo.ts) finds if one follows — a
+single backward walk from EOF that also answers `signatureBlockCount`'s
+"how many" question, so there is no second, independent scan left
+anywhere to disagree with it (D18; it replaces D16's own
+`lastTagSignatureBeginIndex`/`stackedTagBlockCount` pair, which could
+still disagree on an UNSIGNED tag whose message quotes a complete block
+in the middle with real text after it — `lastTagSignatureBeginIndex`'s
+bare `lastIndexOf` had no notion of "is this actually trailing the
+object" and returned the quote's own position as a false boundary) —
+NEVER `for-each-ref --format=%(contents)`, which for an ALREADY-SIGNED
+tag includes the existing trailing signature block as part of its own
+output (git's own documented behaviour). Feeding that straight back in as
+the new tag's message embedded the OLD signature as literal text inside
+the new one, which then received a second, genuinely new signature
+appended right after it — a tag object with two concatenated signature
+blocks (found resigning an already-signed tag, the single most common
+real case: see AC-57). An unsigned tag whose message ENDS with a
+complete quoted block — genuinely indistinguishable from a tag that IS
+signed but whose signature gpg can neither verify nor attribute to any
+key (§ 5.5's own ambiguity) — is refused outright (exit 1, naming the
+tag) rather than guessed at, by this subcommand and by `resign-commits`'
+own tag-on-tag path alike (D18). Afterwards, per tag:
+`verify: <tag>: OK` / `FAILED (<reason>)`
+(target unchanged; the tag object's bytes before the signature block
+byte-identical; the new message independently byte-identical to the old
+one — computed via a SEPARATE, regex-based method,
+`independentOldTagMessage`, that cannot share a bug with the one walk
+above, D18; the new object has EXACTLY ONE signature block, never 0 or
+2+ — the defensive guard that would have caught the bug above on its own,
+since the byte-identity check and `git tag -v` both happened to miss it;
+`git tag -v` accepts the new signature by the policy key),
+then `resign-tags: <tag> <old-sha> -> <new-sha>`, then a `#`-prefixed line
+giving the exact command to push the change: `git push
+--force-with-lease=refs/tags/<tag>:<old-sha> <remote> refs/tags/<tag>`
+(`<remote>` is a literal placeholder — this tool never inspects or assumes a
+remote, and never pushes, ever). A re-signed tag whose new object is
+byte-identical to the old one (a deterministic signature scheme such as
+EdDSA, re-signed at the same signature time) is reported `resign-tags:
+<tag> <sha> -> <sha> (unchanged)` and gets no push line — nothing moved
+(D17). Without `--apply`: lists lightweight skips
+and `resign-tags: <tag> would be re-signed` per candidate; exits 0; writes
+nothing. No candidates (and no explicit list): `git-sign: nothing to resign`,
+exit 0.
+
+### 5.4 `check <repo> [<range>] [--range=<range>] [--tags] [--policy=<file>]`
+
+Read-only; writes nothing, ever (no `--apply`). `<range>` may be given
+positionally or as `--range=<range>` (giving both is a usage error, exit 2
+— § 0's "any further unexpected positional is a usage error" applies here
+too: a third positional, beyond `<repo>` and `<range>`, is also exit 2).
+Default, when neither is given, is `@{upstream}..HEAD`; no upstream
+configured is a refusal naming `--range`/the positional form as the way out
+(same silent-on-refusal shape as everywhere else in this spec — this is a
+precondition failure, not the violations case below). For every commit in
+`<range>` (and, with `--tags`, every annotated tag in the repo, regardless
+of `<range>`), checks:
+
+- **identity** — author (and, separately, committer/tagger) name+email
+  exactly equal the policy's;
+- **signature** — a valid signature (`git verify-commit`/`verify-tag --raw`'s
+  `VALIDSIG` line) by `policy.signingKey` (fingerprint, or a suffix of it —
+  gpg's own reported key-id length is not consistent across versions). The
+  detail names which specific case: `missing` (no signature at all); `signed
+  by unknown key <keyid> (not in keyring)` (`NO_PUBKEY` — the signing key
+  isn't in the verifying keyring); `good signature but by <fingerprint>, not
+  the policy key` (a cryptographically good signature, just not by
+  `policy.signingKey`); `bad signature` (anything else gpg itself calls
+  invalid); `multiple-signatures (<N> signature blocks found)` — checked
+  BEFORE any of the other cases above, and never silently resolved by
+  picking "the first" block found: `siginfo.ts`'s `extractSignature`
+  refuses to hand such an object to gpg at all, and this case is reported
+  on its own rather than falling through to `missing`. For a commit: 2+
+  top-level `gpgsig`/`gpgsig-sha256` header lines, counted in the HEADER
+  REGION ONLY (up to the first blank line) — never the whole object,
+  which also includes the MESSAGE, where a line that happens to start
+  with "gpgsig " as ordinary prose must not be miscounted as a second
+  signature (D16, Lead-found). For a tag: not "2+ `-----BEGIN PGP
+  SIGNATURE-----` markers anywhere in the object" (that over-fires on a
+  message that legitimately QUOTES a signature block as literal text,
+  e.g. pasting an old security advisory into a release tag) but 2+
+  signature blocks STACKED back-to-back at the very end of the object —
+  walking backward from EOF, each complete `BEGIN...END` block
+  immediately preceded (modulo blank lines) by another complete block
+  counts as one more layer (`tagSignatureBoundary`'s `count`, siginfo.ts —
+  D18 unified this with the boundary-finding question itself, see § 5.1
+  above). A quoted block followed by further real text before the real
+  trailing signature does NOT count; a quoted block with nothing between
+  it and the real signature is genuinely indistinguishable from the
+  item-0 corruption shape and DOES still count (D16). Found as a
+  follow-up to the message-extraction bug above — see AC-58 (the
+  hand-constructed shape, independent of any one tool producing it),
+  AC-61 (the quoted-block and message-prose false-positive cases D16's
+  redefinition fixes), and AC-65 (the unsigned-tag boundary-disagreement
+  bug D18 fixes, plus the ambiguous all-quote-no-text-after ending both
+  tag-resigning paths now refuse on rather than guess);
+- **date** — author and committer (or tagger) date outside every forbidden
+  window, unless exempted by `anonymousBefore` (§ 5.0);
+- **sig-time** — the signature's own creation time, for a signature the
+  `signature` check above found `ok` — parsed from the signature PACKET's
+  own `version <n>, created <epoch>,` field via `gpg --list-packets` (NOT
+  the human-readable date on the hashed-subpacket annotation a few lines
+  down — that is a date string, not an epoch), independent of trust state.
+  A present signature whose creation time cannot be parsed is itself a
+  violation (`signature creation time could not be read`), never silently
+  treated as clean — this is what catches a leaked real-time signature on
+  an otherwise-anonymised commit (D8/D9). The rule applied to that time
+  depends on whether the object's own date (author/committer for a commit,
+  tagger for a tag) is exempted by `anonymousBefore`: a real-dated object's
+  signature must fall outside every forbidden window, exactly as above; an
+  **anonymised** object's signature is never checked against the windows at
+  all — by construction it is always pinned to `key creation + 60s` (D1),
+  and that pin itself leaks nothing a public key doesn't already reveal —
+  instead the signature time must equal that pin EXACTLY, anything else
+  (including a real workday instant) being its own violation (`anonymous
+  object not signed at the pinned time (expected <t1>, got <t2>)`, D10);
+- **message** — free of every `forbiddenMessagePatterns` entry (matched
+  case-insensitively, § 5.0).
+
+Each hit is one stdout line, `<sha|tag> <rule> <detail>` (`rule` is one of
+`identity`/`signature`/`date`/`sig-time`/`message`), followed by a summary
+`check: <N> violation(s) across <M> commit(s)[ and <K> tag(s)]`. **(decision)**
+Exit 0 when clean; exit 1 with the violation lines already on stdout when
+not — a deliberate exception to § 0's "nothing on stdout on a refusal": the
+violation lines are the entire point of `check`, the pre-push gate every
+agent runs before pushing, and a silent exit 1 here would be useless.
+
+### 5.5 `resign-commits <repo> (<lower>..<upper> | <rev> --from-root) [--map-out=<file>] [--policy=<file>] [--apply]`
+
+Re-signs every commit in `<lower>..<upper>` (two dots; `<lower>` exclusive,
+`<upper>` inclusive — call this set R0) AND every TRUE descendant of a
+member of R0, reachable from any local branch or tag, not just `<upper>`'s
+own branch — since a descendant's parent hash changes too and so needs a
+new commit object regardless of whether it is itself "in range". `<upper>`
+must actually be a descendant of `<lower>`; neither resolving, or `<upper>`
+not descending from `<lower>`, is a refusal naming the range (D11, same
+`invalid revision range '<r>'` shape as § 5.4's positional range, never an
+uncaught crash). The range's SHAPE is a CLI question, checked before the
+repo or the policy is even looked at, and each mistake is a usage error
+(exit 2, D17): `...` (three dots) — `<range> must be '<lower>..<upper>'
+(two dots, not three)`; an empty side (`main..`, `..main`) — `<range> must
+be '<lower>..<upper>'`; a bare `<rev>` without `--from-root` — below;
+`--from-root` together with a `..` range — `--from-root takes a bare
+<rev>, not a range ('<r>')`.
+Merge commits anywhere in the rewritten set are refused, same rule as
+git-release-squash.
+
+**Root-inclusive form (D15; D17 requires `--from-root`):** `<rev>
+--from-root` — a bare revision with no `..` at all — means R0 = every
+ancestor of `<rev>`, root commit included — the same thing a single
+revision already means to `git rev-list` itself. Without `--from-root`, a
+bare `<rev>` is a usage error, nothing touched: `'<rev>' has no '..' --
+that re-signs the whole history down to the root; pass --from-root if you
+mean that, or use <lower>..<upper>`. The dry run of the root-inclusive
+form prints `resign-commits: root-inclusive: <N> commits` (N = the whole
+rewrite set, descendants included) as its FIRST line. There is no
+earlier commit to name as `<lower>` for a history's very first commit, so
+this is the only way to say "re-sign everything". The candidate superset's
+walk and the `<upper>`-descends-from-`<lower>` sanity check both simply
+skip the lower side when there isn't one; everything else (the rewrite,
+atomicity, tag-on-tag, verification) is identical either way.
+
+> **Warning:** a bare revision means neither "that one commit" nor "the
+> last N commits" — which is why it needs `--from-root`.
+> `resign-commits <repo> main --from-root` — and just as much
+> `resign-commits <repo> HEAD~3 --from-root` — re-signs EVERY ancestor of it down to
+> the root, plus every descendant of those on any local branch or tag:
+> usually the entire history. Every one of those commit hashes changes,
+> and every affected branch and tag then needs a force push. To re-sign
+> only the last N commits, write `HEAD~N..HEAD`. Always run without
+> `--apply` first and read the list of commits, branches and tags it
+> would touch.
+
+**Precise selection rule (D14, CRITICAL fix, reviewer-found):** the
+rewrite set is R0 UNION every commit transitively descended from a member
+of R0 — never merely "every commit that is not an ancestor of `<lower>`".
+The two are not the same set: a branch forked AT (or before) `<lower>`
+that never merges back, or a branch with entirely unrelated history (an
+orphan branch, say), is "not an ancestor of `<lower>`" without having any
+real relation to `<range>` at all, and an earlier version of this rule
+(`rev-list --branches --tags ^<lower>` alone) silently caught and moved
+both. The fix walks the candidate superset (still `rev-list --topo-order
+--reverse --branches --tags ^<lower>`, needed to catch real descendants on
+branches other than `<upper>`'s own) in topological order, and marks a
+candidate for rewrite only if it is literally in R0 (`rev-list
+<lower>..<upper>`) or at least one of its real parents has already been
+marked — true transitive descendance from R0, computed in one pass since
+topological order guarantees every parent is visited before its children.
+A ref (branch, or tag — see below) is "affected" (and so moves at all)
+only if its tip ends up marked by this rule; everything else is left
+byte-for-byte untouched, proven by AC-54's fixture (a side branch forked
+at `<lower>` itself, an orphan branch with unrelated history, and a signed
+tag on each — none of the three move; a side branch forked at `<lower>`'s
+own child in R0 does move, since its tip is a true descendant).
+
+Tree, every mapped parent, author (name/email/date) and committer
+(name/email/date), message, and every other header are byte-identical to
+the original — ONLY the signature changes, verified afterwards (below).
+Author/committer dates are kept EXACTLY as recorded (the original offset,
+never recomputed from `policy.timezone`). **Precondition, checked before
+anything is written, dry run or not**: every commit to be re-signed must
+already carry `policy.identity` as BOTH author and committer — otherwise a
+refusal naming the commit; identities are never changed by this command.
+
+Signature time (`signTimeFor`, `lib/policy.ts`, shared by `commit`/`tag`/
+`resign-tags`/`resign-commits`): the commit's own committer date — UNLESS
+that predates `policy.signingKey`'s own creation time, in which case it is
+clamped up to the first policy-ALLOWED minute at or after `created + 60s`
+(D1's universal rule, generalized: a signature can never predate its own
+key, whether the key was rotated after the commit was first signed, or the
+commit's date is simply older than the key — found missing here while
+dogfooding against nanojira's real history, D11; the floor is NOT the raw
+`created + 60s` instant itself, since that can fall inside a forbidden
+window too — found dogfooding the fix itself, D13). A committer date
+exempted by `anonymousBefore` uses the D10 pin (`created + 60s` EXACTLY,
+unaffected by D13) instead, exactly as § 5.4 checks it.
+
+Refs: every local branch whose tip is a rewritten commit moves to its new
+hash. Every annotated tag on a rewritten commit is re-created on the new
+hash, same tagger line and message bytes, signature time per the same
+rule (tagger date, clamped if needed, or the D10 pin); every lightweight
+tag on a rewritten commit moves its ref directly. Remote-tracking refs are
+never touched, never read for this computation (`--branches --tags`, not
+`--all`).
+
+**Atomicity (D14, HIGH fix, reviewer-found; tag construction hardened
+further per D14's own two-attempts writeup):** every new object — every
+rewritten commit, and every re-created signed tag object — is created
+before any real branch or tag ref is moved for real. A signed tag's new
+object is built by `buildSignedTagObject`: the tag's raw text
+(`object`/`type`/`tag`/`tagger`/blank line/message) is written by hand,
+signed DETACHED with the same `--faked-system-time` gpg wrapper
+`createSigner` builds for everything else, and the signed result is
+written straight to the object store via `git hash-object -t tag -w
+--stdin` — which, like `commit-tree` for a commit, never creates or moves
+ANY ref. (Two earlier approaches — a throwaway temporary tag name, and
+creating under the real name then reverting the incidental ref move —
+both corrupt the object or leave a genuine, if narrow, crash window; see
+D14 for why.) Only once every object this command will need already
+exists does it move every branch and tag together, in ONE `git update-ref
+--stdin` transaction (`start`/`update <ref> <new> <old>`, one line per
+ref, each `<old>` checked/`prepare`/`commit`) — all-or-nothing. A failure
+building any object (a signing failure on some tag, say) means the
+transaction is never even reached: nothing moves, not even a ref
+processed earlier in the same run, and the backup bundle taken before any
+of this started is still there to restore from (§ 4.1, restore recipe
+below). `resign-tags` (§ 5.3) follows the identical pattern when it moves
+more than one tag.
+
+**Unverifiable old signature, named on replacement (D15):** neither this
+command nor `resign-tags` ever refused or crashed on an existing signature
+they cannot verify (no public key for it in this keyring) — both already
+unconditionally overwrite any existing signature regardless of its own
+validity. What they now additionally do is name it: before resigning,
+each commit/tag's OLD signature status is checked, and if it is
+`unknown-key` (NO_PUBKEY), an extra line is printed — `<sha> would replace
+unverifiable signature (key <keyid>)` in dry run, `<sha> replaced
+unverifiable signature (key <keyid>)` once applied — naming the key that
+can no longer be checked at all. Not printed for a signature that IS
+cryptographically good but by some other key (`wrong-key` — already a
+distinct, correctly-reported case, not "unverifiable"), nor for one gpg
+itself calls outright invalid with no key id to show (`bad`).
+
+**Tag-on-tag (D14, MEDIUM fix, reviewer-found):** an affected signed tag
+whose own IMMEDIATE target (not the fully-dereferenced commit used to
+decide affectedness in the first place) is ANOTHER tag, not a commit
+directly, is never flattened onto the commit. It is re-created once its
+inner tag's own new object exists, pointing AT that new inner tag object,
+with the same `type tag` header the original carried — preserving the
+chain exactly, however deep. Dependency order between a chain's tags is
+resolved by an iterative work queue (no fixed processing order is
+assumed), refusing cleanly, naming every remaining tag, if some
+dependency can never resolve (should not happen for any acyclic tag
+chain, which is the only kind git itself can construct).
+
+Dry run (default): prints which commits would be re-signed, which
+branches/tags would move, and writes no objects (D2) — but, unlike
+`plan`/`tail`, does NOT show the new shas: there is no no-write form of
+`commit-tree -S` (§ 5.1's own rule, same reason), so a dry run honestly
+cannot know a re-signed commit's hash before actually invoking gpg and
+writing the object. The root-inclusive form's dry run (and only it) starts
+with the `root-inclusive: <N> commits` line above.
+
+`--apply`: creates the backup bundle first (§ 4.1); re-signs oldest-first
+so every parent mapping is available by the time its child needs it;
+moves refs; writes `--map-out`'s `<old-sha> <new-sha>` lines (one per
+rewritten commit AND per moved tag) to a file outside the repo (§ 4.4's
+rule, reused) if given. Afterwards: `verify: tree delta` (every new tree
+equals its original); `verify: resign-commits: headers preserved` (every
+`cat-file commit` with `parent`/`gpgsig` lines stripped is byte-identical
+between old and new); `verify: resign-commits: parents mapped` (every new
+commit's own parent line equals the expected mapped — or, for the first
+rewritten commit on a chain, unchanged — parent); `verify: resign-commits:
+check (signature/sig-time)` (re-running `check`'s own logic against the
+new shas finds 0 `signature`/`sig-time` violations — identity/date/message
+are untouched by a re-sign and so are not re-checked here). Exit 0 only if
+every verification passes; never pushes, printing the exact commands
+instead: `# git push --force-with-lease=<branch>:<old-sha> <remote> <branch>`
+per moved branch, `# git push --force-with-lease=refs/tags/<tag>:<old-sha>
+<remote> refs/tags/<tag>` per moved/re-signed tag — `<remote>` a literal
+placeholder, as in § 5.3. Each rewritten commit's line is
+`resign-commits: <old-short> -> <new-short>`, with ` (unchanged)` appended
+when a deterministic signature at the same signature time reproduced the
+identical object; a branch or tag whose sha did not change gets no push
+line (D17).
+
+**(decision, D13)** A real (non-anonymous) commit whose own date predates
+the signing key is clamped to the first policy-ALLOWED minute at or after
+`created + 60s`, not the raw pin itself — that floor is a constant for a
+given key+policy pair (like the D10 anonymous pin, it leaks nothing), and
+because it is by construction never inside a forbidden window, `check`'s
+ordinary `sig-time` rule (§ 5.4) needs no special case for it: a
+`resign-commits`/`commit`/`tag`/`resign-tags` signature produced this way
+always passes `check` cleanly on its own terms. (An earlier draft of this
+rule clamped to the raw `created + 60s` pin unconditionally, which could
+itself fall inside a forbidden window and so trade one `check` violation
+for another — found dogfooding; superseded by this rule before release.)
+
+## 6. Acceptance criteria
 
 One test file per criterion, `test/ac/ac-NN-<slug>.ts`, run via
 `node test/run-all.ts` (defaults to `bin/` next to `test/`; an explicit
@@ -469,3 +1011,28 @@ written before the implementation.
 | AC-38 | ac-38-squash-dry-run-writes-no-objects.ts | `plan`/`apply`/`tail` dry runs leave `.git/objects` byte-identical |
 | AC-39 | ac-39-rewrite-dry-run-writes-no-objects.ts | `replace`/`add-file` dry runs leave `.git/objects` byte-identical |
 | AC-40 | ac-40-harness-cleanup-leaves-tmp-root-empty.ts | harness hygiene: backup bundles are cleaned up too; a run leaves 0 entries in a fresh tmp root |
+| AC-41 | ac-41-npm-install-bin-resolves.ts | D7: a `node_modules`-shaped fixture resolves and runs a tool end to end |
+| AC-42 | ac-42-sign-commit-basic.ts | `commit`: dry run report, `--apply` identity/date/key/signature from the policy (not repo config), forbidden message and forbidden window both refused |
+| AC-43 | ac-43-sign-commit-amend.ts | `commit --amend`: author date/identity pinned to the chosen values despite git's own amend quirk; lower bound is the grandparent's committer date |
+| AC-44 | ac-44-sign-commit-date-auto.ts | `--date=auto`: latest allowed minute <= now; walks back out of a forbidden window; refuses naming the next allowed minute when none exists |
+| AC-45 | ac-45-sign-tag.ts | `tag`: dry run/apply shape, refuses an existing tag name, refuses a date not after the target's committer date |
+| AC-46 | ac-46-sign-resign-tags.ts | `resign-tags`: default selection (not signed by the policy key), skips lightweight, explicit list overrides selection, target/tagger/message bytes unchanged, backup bundle, verify lines, push hint, idempotent re-run |
+| AC-47 | ac-47-sign-check.ts | `check`: clean range exit 0, named violation lines (identity/signature/date/message) and exit 1, no-upstream refusal, `--tags` |
+| AC-48 | ac-48-sign-policy-validation.ts | policy file: missing/malformed/inside-repo/unknown-key/bad-timezone/bad-key/bad-window/bad-regex/bad-`anonymousBefore` are each a refusal naming the problem; a valid `anonymousBefore` is accepted |
+| AC-49 | ac-49-sign-check-hardening.ts | `check`: a leaked real-time signature on an allowed-date commit is caught as `sig-time` (and fails closed when unreadable); positional `<range>` is honoured and conflicts/extra positionals are usage errors; `anonymousBefore` exempts the date rule only, never identity; `forbiddenMessagePatterns` match case-insensitively; `signature` detail distinguishes missing/unknown-key/wrong-key; an anonymised object's `sig-time` is checked against the D1 pin exactly (clean when it matches, a named violation when it doesn't), while a real-dated object keeps the window rule |
+| AC-50 | ac-50-sign-check-invalid-range.ts | `check`: an unresolvable range (e.g. `<root>~1..HEAD`) or syntactic garbage is a refusal naming the range, exit 1, nothing on stdout, no stack trace -- never an uncaught crash |
+| AC-51 | ac-51-sign-resign-commits.ts | `resign-commits`: dry run lists every commit/branch/tag affected across branches forked mid-range and writes no objects; `--apply --map-out=` rewrites the full descendant set with mapped parents, byte-identical headers/message, re-created annotated tag and moved lightweight tag, a clean follow-up `check --tags`, correct push hints, and a backup bundle; refuses a commit not authored/committed by the policy identity, naming it; refuses a merge commit in range, naming it; an anonymised commit's new signature time is pinned exactly to `created + 60s` (D10); a real commit older than the signing key is clamped to the first policy-allowed minute at/after `created + 60s` -- never the raw pin, which can itself fall inside a forbidden window -- rather than crashing gpg with a time-warp error, while its own committer date on the object stays untouched (D11/D13) |
+| AC-52 | ac-52-sign-commit-date-before-key.ts | `commit --date=<date before the signing key>`: against a policy whose forbidden window deliberately covers the raw `created + 60s` pin, the signature is clamped to the first allowed minute at/after it, not the pin itself; no crash, no forbidden-window refusal; a follow-up `check` reports 0 violations with no special case needed (D13) |
+| AC-53 | ac-53-sign-allowed-minute-cap-defensive.ts | `nextAllowedMinuteAfter`/`signTimeFor` (white-box unit test, not black-box): once the 20160-step search cap is exhausted, returns `null`/refuses instead of silently returning a still-forbidden instant -- exercised via a hand-built, schema-circumventing `Policy` (`to: '24:00'`) no file loader could ever produce, since any schema-valid policy always leaves some minute open (D14) |
+| AC-54 | ac-54-sign-resign-commits-range-selection.ts | `resign-commits`: the precise selection rule (D14, CRITICAL) -- a side branch forked AT `<lower>` and an orphan branch with unrelated history are left byte-for-byte untouched (dry run never lists them, `--apply` moves nothing of theirs), while a side branch forked at a true R0 member IS rewritten/moved, same for a signed tag on each |
+| AC-55 | ac-55-sign-resign-commits-atomic.ts | `resign-commits`: atomicity (D14, HIGH) -- a forced object-creation failure on the second of two tags (a pre-existing `refs/tags/<name>.lock` file, the same lock git's own ref-update machinery uses) leaves every ref, including one processed earlier in the same run, exactly as it was, with the backup bundle still present; removing the injected failure and retrying the identical command then succeeds cleanly |
+| AC-56 | ac-56-sign-resign-commits-tag-on-tag.ts | `resign-commits`: tag-on-tag (D14, MEDIUM) -- an outer signed tag whose immediate target is another (inner) signed tag is re-created pointing at the new inner tag object, `type tag` preserved, never flattened onto the commit; both tags' own `tag <name>` header is correct (not some temporary name) and both verify |
+| AC-57 | ac-57-sign-resign-double-signature.ts | `resign-tags`/`resign-commits`: resigning an ALREADY-SIGNED tag never corrupts it with two concatenated signature blocks (item 0, CRITICAL, Lead-directed) -- the message is read from the raw object, never `for-each-ref --format=%(contents)`; the new object has exactly 1 signature block, the message itself is exactly the original text with nothing embedded, `git tag -v` and `check --tags` both stay clean; mutation-tested by reverting to `%(contents)` and confirming the exact `verify: ...: FAILED (multiple-signatures)` symptom |
+| AC-58 | ac-58-sign-check-multiple-signatures.ts | `check`: an object (tag or commit) hand-constructed with 2 concatenated signature blocks/`gpgsig` headers -- independent of any one tool producing it -- is reported as `multiple-signatures (<N> signature blocks found)`, never `missing`/`bad`/anything else, never silently passed clean, never a crash |
+| AC-59 | ac-59-sign-resign-commits-root-range-unverifiable.ts | `resign-commits`/`resign-tags` (D15, Lead-directed): a bare `<range>` with no `..` re-signs every ancestor root-inclusive -- a 3-commit history's root keeps its (parentless) new commit, same tree, `git verify-commit` clean on every new commit; a commit/tag signed by a key not in this keyring (NO_PUBKEY) is reported as `... would replace unverifiable signature (key <keyid>)` in dry run and `... replaced unverifiable signature (key <keyid>)` on apply, never printed for an already-correctly-signed object; mutation-tested by reverting the bare-range acceptance (reproduces the old `<lower>..<upper>` refusal) and by reverting `unverifiableKeyLabel` to always return null (reproduces the silent, unnamed replacement) |
+| AC-60 | ac-60-policy-boundaries.ts | policy windows through the CLI (`commit --date=…` dry runs): `from` inclusive, `to` exclusive (07:00 forbidden, 19:00 allowed), weekday-only windows (Saturday never forbidden under a mon–fri policy), Europe/Berlin DST transitions; a non-existent (spring-forward) or ambiguous (fall-back) wall time is a refusal naming it, an explicit offset sidesteps both; the process's own timezone never changes the result |
+| AC-61 | ac-61-sign-signature-boundary-quoted-blocks.ts | `check`/`resign-tags`/`resign-commits` (D16, Lead-directed pre-review): a tag whose message quotes an old PGP signature block followed by further real text is read, re-created, and reported as 1 signature block, message byte-exact including everything after the quote (via both `resign-tags` and `resign-commits`'s tag path); a quote with nothing between it and the real trailing signature is -- correctly, deliberately -- still `multiple-signatures`, indistinguishable from item-0's own corruption; a validly-signed commit whose MESSAGE contains a line starting with "gpgsig " as prose is never miscounted as a second signature; mutation-tested against both the tag-side (last-marker → first-marker, stacked-count → raw-occurrence-count) and commit-side (header-region-only → whole-object) reverts |
+| AC-62 | ac-62-sign-resign-commits-from-root.ts | `resign-commits` (D17): a bare `<rev>` (`main`, `HEAD~1`, with or without `--apply`) is a usage error naming `--from-root`, no ref moved, no object written; `<rev> --from-root`'s dry run starts with `root-inclusive: <N> commits` (a `..` range never prints it); `...`, an empty side, and `--from-root` with a range are usage errors with ONE `git-sign:` prefix, checked before the policy; an unresolvable revision stays a refusal; push hints use the literal `<remote>`, and a byte-identical re-run reports `(unchanged)` with no push hint; mutation-tested (the `--from-root` check, the count line, `<remote>`, the unchanged-branch skip) |
+| AC-63 | ac-63-sign-gpg-program-policy.ts | `gpgProgram` (D17): a repo `gpg.program` that would fail every call is never run by `check`, `commit --apply` or `resign-commits --apply` (git's own `verify-commit` included); the policy's `gpgProgram` is used for signing and verification; a relative path, a non-string, a missing file, a directory and a non-executable file are each a policy refusal naming the problem; mutation-tested (no `GIT_CONFIG_*` override; policy key ignored) |
+| AC-64 | ac-64-sign-help-usage-messages.ts | `git-sign --help`/`-h`/`help`: every synopsis on stdout, exit 0; `<sub> --help`: exactly that synopsis; no subcommand: exit 2, `missing subcommand` + synopses on stderr; `--message --apply` (and `git-leak-scan --terms --allow`) is `missing value for --<flag>`, nothing written, while `--message=--apply` is accepted (D17); `tag` names "the target's" committer date, `commit` "the parent's"; `resign-tags` on a byte-identical re-sign reports `(unchanged)` with no push hint; mutation-tested (missing-value rule, label, unchanged-tag skip) |
+| AC-65 | ac-65-sign-unsigned-tag-quoted-blocks.ts | `resign-tags`/`resign-commits` (D18, HIGH, Lead-found via the Reviewer's pre-review of D16): an UNSIGNED tag whose message quotes a complete block in the MIDDLE with real text after it keeps its full message byte-exact through both tag-resigning paths (D16's own fix still truncated it, since `lastTagSignatureBeginIndex` and `stackedTagBlockCount` could disagree on this one shape); `cmdResignTags`'s verify step independently re-derives the old message via a different, regex-based method and would now fail rather than falsely report `OK` if the shared boundary walk alone were wrong; an unsigned tag whose message ENDS with a complete quoted block is refused (exit 1, naming the tag) by both paths rather than guessed at; mutation-tested against the unified boundary function (reverting `index` to the old bare `lastIndexOf`), the independent verify check (disabling it on top of the boundary mutation reproduces the false `OK`), and each refusal condition independently |

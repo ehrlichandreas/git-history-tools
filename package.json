@@ -1,23 +1,27 @@
 {
   "name": "git-history-tools",
   "private": true,
-  "version": "0.3.1",
-  "description": "Three tools for preparing a git history for publication: git-release-squash, git-leak-scan, git-history-rewrite.",
+  "version": "0.4.0",
+  "description": "Four tools for preparing a git history for publication: git-release-squash, git-leak-scan, git-history-rewrite, git-sign.",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "bin": {
-    "git-release-squash": "bin/git-release-squash",
-    "git-leak-scan": "bin/git-leak-scan",
-    "git-history-rewrite": "bin/git-history-rewrite"
+    "git-release-squash": "dist/squash.mjs",
+    "git-leak-scan": "dist/scan.mjs",
+    "git-history-rewrite": "dist/rewrite.mjs",
+    "git-sign": "dist/sign.mjs"
   },
   "scripts": {
+    "build": "node tools/bundle.ts",
+    "build:check": "node tools/bundle.ts --check",
     "typecheck": "tsc --noEmit",
-    "test": "node test/run-all.ts"
+    "test": "node tools/bundle.ts --check && node test/run-all.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "^0.25.12",
     "typescript": "^5.6.0"
   }
 }

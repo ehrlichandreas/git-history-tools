@@ -4,6 +4,7 @@
  * check's OK line. */
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
@@ -35,6 +36,52 @@ if (gpg) {
     const vt2 = spawnSync('git', ['verify-tag', 'v2'], { cwd: repo, env: gpg.env, encoding: 'utf8' });
     T.check('AC-13: git verify-tag genuinely accepts v1', vt1.status === 0, vt1.stderr);
     T.check('AC-13: git verify-tag genuinely accepts v2', vt2.status === 0, vt2.stderr);
+  }
+}
+
+/* Bug fix regression: verifySignatures() used to walk `rev-list --all`,
+ * which also follows refs/remotes/* (and refs/stash, refs/notes) -- a
+ * stale remote-tracking ref left pointing at the pre-squash tip (apply
+ * never touches refs/remotes) made an old, now-superseded commit still
+ * show up as "reachable" and get checked, even though it carries a
+ * signature from a totally different key than the one actually used for
+ * the squash. Reproduced here: the root commit (which gets squashed away)
+ * is signed with a SEPARATE throwaway key the squash's own keyring never
+ * sees, and a `refs/remotes/origin/main` ref is left pointing at it --
+ * `apply --apply` must still report `verify: signatures: OK` and never
+ * mention that commit or its key at all. */
+{
+  const gpgA = H.setupGpg('ac13-a');
+  const gpgB = H.setupGpg('ac13-b');
+  if (gpgA && gpgB) {
+    const repo = H.initRepo('ac13-cross-key', gpgA);
+
+    /* Root commit signed with key B (repo's configured signingkey is A,
+     * from initRepo -- override it just for this one commit so it's
+     * genuinely B-signed, not A-signed). */
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    const gitB = H.gitIn(repo, gpgB);
+    gitB(['add', '-A']);
+    const commitB = gitB(['-c', 'user.signingkey=' + gpgB.fingerprint, 'commit', '-q', '-S', '-m', 'root']);
+    T.check('AC-13 (cross-key) fixture: root commit signed with key B', commitB.status === 0, commitB.stderr);
+    const rootSha = H.revParse(repo, gpgA, 'HEAD');
+
+    H.tagSigned(repo, gpgA, 'v1', 'release v1');
+
+    /* Simulate a remote clone's stale tracking ref: still at the
+     * pre-squash tip, since apply never fetches or pushes. */
+    H.gitRaw(repo, gpgA, ['update-ref', 'refs/remotes/origin/main', rootSha]);
+
+    const map = path.join(H.freshDir("ac13-cross-key-map"), "ac13-cross-key-map.txt");
+    const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpgA.gnupgHome });
+    T.exit('AC-13 (cross-key): apply --apply: exit 0', r, 0);
+    if (!r.missing) {
+      T.contains('AC-13 (cross-key): signatures check is OK, not referencing the orphaned key-B commit',
+        r.stdout, 'verify: signatures: OK');
+      T.check('AC-13 (cross-key): stdout/stderr never mention the old root commit\'s sha',
+        !r.stdout.includes(rootSha.slice(0, 7)) && !r.stderr.includes(rootSha.slice(0, 7)),
+        'stdout: ' + r.stdout + ' stderr: ' + r.stderr);
+    }
   }
 }
 
