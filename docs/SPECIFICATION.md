@@ -56,7 +56,12 @@ implementation that disagrees is wrong, not the test.
 
   So 1 alone does not say whether anything was written: a refusal before
   the bundle wrote nothing, a refusal after it left the bundle and its
-  `backup:` line (§ 4.1), and a FAILED verify moved the refs.
+  `backup:` line (§ 4.1). A FAILED verify line is now checked against the
+  new objects before the ref transaction (§ 4.2, D24): it leaves the
+  bundle and any objects already written, but no ref moved. Only
+  `signatures` (every tool), `every commit tagged` (`apply` only), and
+  `rule sources clean` (`replace` only) still run after the transaction
+  and so can still FAIL on a run whose refs did move.
 - `<repo>` is always a required positional argument: the path to the git
   repository to operate on (never the current directory implicitly). A
   `<repo>` that is not a git repository (no `.git`) is a refusal, not a
@@ -580,29 +585,54 @@ above, not a push from a mirror.
 
 ### 4.2 Verification
 
-After every `--apply` write (never during a dry run, which has nothing to
-verify), in this order, each printed as `verify: <check>: OK` or `verify:
-<check>: FAILED (<reason>)`:
+Every `--apply` write computes and checks these verify lines (never
+during a dry run, which has nothing to verify), each printed as `verify:
+<check>: OK` or `verify: <check>: FAILED (<reason>)` on success. Every
+one of them is now checked BEFORE the ref transaction (§ 4.5, D24): a
+FAILED line is a refusal (exit 1, the backup bundle and any objects
+already written kept, no ref moved) rather than a write whose refs have
+already moved. On success every line is printed once, in this order:
 
 1. `tree delta` — every ref's tree, post-rewrite, exactly equals the
    corresponding pre-rewrite tree it is supposed to preserve (the tagged
    commit's tree for squash, the rule-rewritten tree for replace/add-file)
-   — nothing else changed.
+   — nothing else changed. Object-sha-based, no ref read at all.
+   `resign-commits` has three more object-sha-based checks of its own
+   (§ 5.5): `headers preserved`, `parents mapped`, `check
+   (signature/sig-time)`.
 2. `signatures` — every commit and annotated tag reachable from any local
    branch or tag (`refs/heads/*`, `refs/tags/*` -- **not**
    `refs/remotes/*`, which `apply`/`tail`/`replace`/`add-file` never touch
    and may still point at pre-rewrite history) has a signature `git
-   verify-commit`/`git verify-tag` accepts.
+   verify-commit`/`git verify-tag` accepts. Checked against the PLANNED
+   final ref map (D24): the new sha for every ref the pending transaction
+   is about to write, the CURRENT sha -- read once, before anything was
+   written -- for every other branch/tag the run leaves alone, each of
+   which also rides the ref transaction itself (§ 4.5) as a `verify <ref>
+   <sha>` line against that same read, so one drifting in the meantime
+   aborts the whole transaction rather than going unnoticed (Q2
+   hardening). An unrelated branch's own unsigned commit still fails this exactly as it
+   always did (the check covers every branch/tag, not just the one this
+   run touches); for `apply`/`tail`, that FAILED line used to arrive
+   after their own branch/tags had already moved -- fixed (Q2
+   follow-up). For `replace`/`add-file`, which resign every commit
+   reachable from `--branches --tags` including an otherwise-unrelated
+   one, there is in practice no live way left to make this FAILED: their
+   own full-history resign leaves no stale, differently-signed commit
+   behind for it to catch.
 3. `squash: every commit tagged` — (git-release-squash `apply` only; skipped,
    not printed, for `tail`/`replace`/`add-file`) every commit reachable
-   from HEAD has at least one tag pointing at it.
+   from the PLANNED new HEAD has at least one tag, among the PLANNED
+   tags, pointing at it. Same planned-ref-map treatment as `signatures`.
 4. `replace: rule sources clean` — (git-history-rewrite `replace` only;
    skipped for `add-file`/git-release-squash) a git-leak-scan (§ 2.1, built-in
    categories only, no `--terms`/`--allow`) of the **values on the right-
    hand side of `--rules`** (the chosen replacement text, one synthetic
    "blob" per rule, not the left-hand `from` text, and not the file's own
    path) finds 0 hits — catching a replacement that swaps one leak for
-   another.
+   another. Needs no ref at all (it only scans the `--rules` values
+   themselves); left in its existing post-move position regardless --
+   out of scope for D24 and its follow-up, to keep the change minimal.
 
 ### 4.3 Anonymous dates
 
@@ -665,7 +695,14 @@ commit the run rewrote, and the run exits 1 after its verify lines.
 A failure anywhere before or in that
 transaction leaves every ref as it was: `<bin>: ref update transaction
 failed: <git's first stderr line>`, exit 1 (the backup bundle and any
-objects already written stay; AC-74). A new tag's message gets the
+objects already written stay; AC-74). **(D24)** The object-sha-based
+verify lines (§ 4.2's `tree delta`, and `resign-commits`'s own three) are
+now also computed and checked against the new objects before this same
+transaction: a FAILED one there is exactly this kind of failure — a
+refusal, exit 1, the backup bundle and the new objects kept, nothing
+moved (AC-108) — one object further "before the transaction" than the
+drift check above, which still needs the refs' own old values read once
+to compare against. A new tag's message gets the
 cleanup `git tag -F` applies by default (`git stripspace
 --strip-comments`), so `apply` and `tail` write byte-identical tags to
 before; `replace`/`add-file` keep the old message byte for byte (§ 3.1).
@@ -1164,19 +1201,27 @@ writing the object. The root-inclusive form's dry run (and only it) starts
 with the `root-inclusive: <N> commits` line above.
 
 `--apply`: creates the backup bundle first (§ 4.1); re-signs oldest-first
-so every parent mapping is available by the time its child needs it;
-moves refs; writes `--map-out`'s `<old-sha> <new-sha>` lines (one per
-rewritten commit AND per moved tag) to a file outside the repo (§ 4.4's
-rule, reused) if given. Afterwards: `verify: tree delta` (every new tree
-equals its original); `verify: resign-commits: headers preserved` (every
-`cat-file commit` with `parent`/`gpgsig` lines stripped is byte-identical
-between old and new); `verify: resign-commits: parents mapped` (every new
-commit's own parent line equals the expected mapped — or, for the first
-rewritten commit on a chain, unchanged — parent); `verify: resign-commits:
-check (signature/sig-time)` (re-running `check`'s own logic against the
-new shas finds 0 `signature`/`sig-time` violations — identity/date/message
-are untouched by a re-sign and so are not re-checked here). Exit 0 only if
-every verification passes; never pushes, printing the exact commands
+so every parent mapping is available by the time its child needs it.
+Every one of this command's own verify lines is computed against the new
+objects, and checked, BEFORE any ref moves (§ 4.2, D24): `verify: tree
+delta` (every new tree equals its original); `verify: resign-commits:
+headers preserved` (every `cat-file commit` with `parent`/`gpgsig` lines
+stripped is byte-identical between old and new); `verify: resign-commits:
+parents mapped` (every new commit's own parent line equals the expected
+mapped — or, for the first rewritten commit on a chain, unchanged —
+parent); `verify: resign-commits: check (signature/sig-time)` (re-running
+`check`'s own logic against the new shas finds 0 `signature`/`sig-time`
+violations — identity/date/message are untouched by a re-sign and so are
+not re-checked here). A FAILED line here is a refusal (exit 1, the backup
+bundle and the new objects already written kept, no ref moved): all four
+checks are sha-based and need nothing from `refs/heads`/`refs/tags`, so
+`resign-commits` has nothing left that must run after the move. Only once
+every line is OK does the command move every ref in one transaction (§
+4.5), write `--map-out`'s `<old-sha> <new-sha>` lines (one per rewritten
+commit AND per moved tag) to a file outside the repo (§ 4.4's rule,
+reused) if given, and print the four already-computed verify lines (same
+order, same `OK` text, as before this change). Exit 0 only if every
+verification passes; never pushes, printing the exact commands
 instead: `# git push --force-with-lease=<branch>:<old-sha> <remote> <branch>`
 per moved branch, `# git push --force-with-lease=refs/tags/<tag>:<old-sha>
 <remote> refs/tags/<tag>` per moved/re-signed tag — `<remote>` a literal
@@ -1317,3 +1362,4 @@ tools exist, any `CANNOT RUN` makes the run exit 1 (D19, AC-69).
 | AC-105 | ac-105-message-file-utf8.ts | a message file that is not valid UTF-8 (§ 0, D23): `tail --tag=v2 --message-file=<f>`, git-sign `commit`/`tag` with `--message-file=<f>` and `--message-file=-`, dry run and `--apply`, exit 2 with exactly `<bin>: --message-file: not valid UTF-8: <f>` (`-` for stdin), nothing on stdout, no ref moved, no bundle, no object written; a valid non-ASCII message, and one starting with a BOM, is kept byte for byte; mutation-tested |
 | AC-106 | ac-106-no-encoding-header.ts | no `encoding` header (§ 0, D21, D23): in a repo whose history has no header and `i18n.commitEncoding=ISO-8859-1` set afterwards, `apply --apply` (two tags), `tail --tag --apply`, `replace --apply`, `resign-commits --apply` and git-sign `commit --apply` exit 0 and every commit they write has no `encoding` header and its message's `café` as UTF-8 (`c3 a9`); with `i18n.logOutputEncoding=ISO-8859-1` alone, `replace --apply` keeps the message's UTF-8 bytes, `scan --terms` with `café` hits it and git-sign `check` matches a `café` message pattern; red on 032c397; mutation-tested |
 | AC-107 | ac-107-explicit-utf8-header.ts | a source commit with an explicit `encoding UTF-8` (or `utf8`) header (§ 0, D20, D23): `resign-commits` `--apply` and dry run exit 1 with one stderr line naming the commit and its header, nothing on stdout, no bundle, no ref moved, no object written; a commit without the header whose message has the line `encoding UTF-8` is re-signed, exit 0, message bytes as they were; `replace --apply` and `add-file --apply` exit 0, the rewritten commit has no `encoding` header and its message bytes as they were; red on 032c397; mutation-tested |
+| AC-108 | ac-108-verify-before-move.ts | a `tree delta` FAILED, forced by a one-shot `git` PATH wrapper answering the first post-`commit-tree` `rev-parse ...^{tree}` with the empty tree's sha (§ 4.2, § 4.5, D24): `resign-commits --apply`, `apply --apply`, `tail --apply`, `replace --apply` and `add-file --apply` each exit 1 with exactly one stderr line naming `tree delta: FAILED`, stdout only the `backup:` line, the backup bundle kept, and every ref exactly as it was before the run; red on ef96e0d5; mutation-tested. Q2 follow-up (Scout MUST, D24): `apply --apply` and `tail --apply`, with a real second unrelated branch holding one unsigned commit, exit 1 with exactly one stderr line naming `signatures: FAILED`, same stdout/bundle/no-ref-moved shape (including the unrelated branch itself); red on ba201494, green and mutation-tested after the planned-ref-map fix. `resign-commits --apply`, with a policy naming a cert-only primary key whose only signing-capable key is a subkey (gpg signs with the subkey; `check` reports `wrong-key`), same shape; red on ef96e0d5, already green at ba201494 (a regression guard for D24's own resign-commits fix, not a new one) |

@@ -102,11 +102,12 @@ function topLevel(dir) {
   const t = run(dir, ["rev-parse", "--show-toplevel"]);
   return t.status === 0 ? t.stdout.replace(/\n$/, "") : null;
 }
-function moveRefs(repo, env, message, moves) {
+function moveRefs(repo, env, message, moves, verifies = []) {
   const lines = ["start"];
   for (const m of moves) {
     lines.push(m.oldSha === null ? "create " + m.ref + " " + m.newSha : "update " + m.ref + " " + m.newSha + " " + m.oldSha);
   }
+  for (const v of verifies) lines.push("verify " + v.ref + " " + v.sha);
   lines.push("prepare", "commit");
   return run(repo, ["update-ref", "-m", message, "--stdin"], { env, input: lines.join("\n") + "\n" });
 }
@@ -472,21 +473,18 @@ function verifyTreeDelta(checks) {
   }
   return line("tree delta", true);
 }
-function verifySignatures(repo, env) {
-  const commitsRaw = text(repo, ["rev-list", "--branches", "--tags"], { env });
+function verifySignatures(repo, env, heads, tags) {
+  const tips = heads.map((h) => h.sha).concat(tags.map((t) => t.commit));
+  const commitsRaw = tips.length ? text(repo, ["rev-list"].concat(tips), { env }) : "";
   const commits = commitsRaw ? commitsRaw.split("\n") : [];
   for (const c of commits) {
     const r = run(repo, ["verify-commit", c], { env });
     if (r.status !== 0) return line("signatures", false, "verify-commit " + c.slice(0, 7) + " failed: " + r.stderr.trim());
   }
-  const tagsRaw = text(repo, ["for-each-ref", "--format=%(refname)	%(objecttype)", "refs/tags"], { env });
-  const tags = tagsRaw ? tagsRaw.split("\n") : [];
-  for (const l of tags) {
-    const [ref, type] = l.split("	");
-    if (type !== "tag") continue;
-    const name = refBase(ref, "refs/tags/");
-    const r = run(repo, ["verify-tag", ref], { env });
-    if (r.status !== 0) return line("signatures", false, "verify-tag " + name + " failed: " + r.stderr.trim());
+  for (const t of tags) {
+    if (t.type !== "tag") continue;
+    const r = run(repo, ["verify-tag", t.tagObj], { env });
+    if (r.status !== 0) return line("signatures", false, "verify-tag " + refBase(t.ref, "refs/tags/") + " failed: " + r.stderr.trim());
   }
   return line("signatures", true);
 }
@@ -826,15 +824,31 @@ function runRewrite(bin, sub, repo, env, opts) {
       });
       remap.set(r.oldSha, nc);
     }
+    const treeChecks = records.map((r) => ({
+      label: r.oldSha,
+      expected: r.finalTree,
+      actual: text(repo, ["rev-parse", remap.get(r.oldSha) + "^{tree}"], { env })
+    }));
+    const treeDelta = verifyTreeDelta(treeChecks);
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
     const { heads, tags } = snapshot;
     const moves = [];
+    const plannedHeads = [];
+    const plannedTags = [];
+    const verifies = [];
     for (const h of heads) {
       const newSha = remap.get(h.sha);
-      if (newSha) moves.push({ ref: h.ref, newSha, oldSha: h.sha });
+      if (newSha) {
+        moves.push({ ref: h.ref, newSha, oldSha: h.sha });
+        plannedHeads.push({ ref: h.ref, sha: newSha });
+      } else verifies.push({ ref: h.ref, sha: h.sha });
     }
     for (const t of tags) {
       const newCommit = remap.get(t.commit);
-      if (!newCommit) continue;
+      if (!newCommit) {
+        verifies.push({ ref: t.ref, sha: t.tagObj });
+        continue;
+      }
       let newObj = newCommit;
       if (t.type === "tag") {
         const raw = text(repo, ["cat-file", "-p", t.tagObj], { env });
@@ -848,10 +862,13 @@ function runRewrite(bin, sub, repo, env, opts) {
         });
       }
       moves.push({ ref: t.ref, newSha: newObj, oldSha: t.tagObj });
+      plannedTags.push({ ref: t.ref, type: t.type, commit: newCommit, tagObj: newObj });
     }
+    const signatures = verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
     const drift = refDrift(snapshot, refTips(repo, env));
     if (drift.length > 0) throw new Refusal("refs changed during the run (" + drift.join(", ") + "); nothing moved, run it again");
-    const txn = moveRefs(repo, env, bin + " " + sub, moves);
+    const txn = moveRefs(repo, env, bin + " " + sub, moves, verifies);
     if (txn.status !== 0) throw new Refusal("ref update transaction failed: " + txn.stderr.trim().split("\n")[0]);
     const known = /* @__PURE__ */ new Set([...heads.map((h) => h.ref), ...tags.map((t) => t.ref)]);
     const after = refTips(repo, env);
@@ -859,12 +876,7 @@ function runRewrite(bin, sub, repo, env, opts) {
     for (const x of late) {
       process.stderr.write(bin + ": " + x.ref + " created during the run" + (remap.has(x.target) ? ", still on the old history" : "") + "\n");
     }
-    const treeChecks = records.map((r) => ({
-      label: r.oldSha,
-      expected: r.finalTree,
-      actual: text(repo, ["rev-parse", remap.get(r.oldSha) + "^{tree}"], { env })
-    }));
-    const results = [verifyTreeDelta(treeChecks), verifySignatures(repo, env)];
+    const results = [treeDelta, signatures];
     if (opts.ruleSourcesCheck) results.push(verifyRuleSourcesClean(opts.ruleSourcesCheck));
     for (const r of results) process.stdout.write(r.line + "\n");
     process.exitCode = results.some((r) => !r.ok) || late.length > 0 ? 1 : 0;

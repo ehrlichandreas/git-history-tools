@@ -1811,10 +1811,13 @@ tells a hit from a crash by 1 vs. anything else, would change meaning.
 Not done; the proposal, for a release that may break callers:
 
 - 0 success, 2 usage error, unchanged;
-- 1 a refusal before anything was written;
-- 3 written, but a verify line FAILED, or a ref created during the run
-  is still on the old history (§ 4.5) (the refs moved; restore from the
-  bundle);
+- 1 a refusal before anything was written, OR objects written but a
+  pre-move verify line FAILED (§ 4.2, D24: object-sha-based, checked
+  before the ref transaction — the bundle and the new objects are kept,
+  but no ref moved, same as a refusal);
+- 3 refs moved, but a post-move verify line FAILED, or a ref created
+  during the run is still on the old history (§ 4.5) (the refs moved;
+  restore from the bundle);
 - 4 `scan` hits / `check` violations (the run itself worked);
 - 5 a refusal after the bundle (refs unchanged, bundle kept);
 - 70 a crash (`EX_SOFTWARE`): `main` catches any other error, prints
@@ -1824,3 +1827,131 @@ Callers that only test `!= 0` keep working; `= 1` callers need the
 CHANGES note. A step that is additive on its own: the crash code alone
 (today 1, and a crash is never contract). It is still left for the same
 decision, so the codes change once.
+
+## D24: a FAILED verify now runs before the ref move, not after (Q2)
+
+`resign-commits --apply`, `apply --apply`, `tail --apply`, `replace
+--apply` and `add-file --apply` all built every new object first, then
+moved every ref in one `update-ref --stdin` transaction (D20, § 4.5),
+and only afterwards computed and printed their verify lines (§ 4.2). A
+FAILED line there left the refs already moved, exit 1, the backup bundle
+(§ 4.1) the only way back — worse than the ordinary post-bundle refusal
+shape, because the working repo's own branches/tags no longer matched
+its history until someone noticed and restored from the bundle.
+
+Every verify check that only reads the newly-written objects by sha —
+`tree delta` (every tool) and, for `resign-commits`, `headers
+preserved`/`parents mapped`/`check (signature/sig-time)` — needs nothing
+from `refs/heads`/`refs/tags`/HEAD, so there was no reason it had to run
+after the move. These are now computed and checked right after the new
+objects exist, before the transaction: a FAILED one is a refusal in the
+usual D20 shape (exit 1, one stderr line naming the failed check, the
+backup bundle and any objects already written kept, nothing on stdout
+but the `backup:` line), no ref moved. For `resign-commits` this is every
+verify line it has, so a FAILED verify there now never moves a ref at
+all. `replace`'s `rule sources clean` needs no ref either, but is left in
+its existing post-move position: out of scope for this decision, to keep
+the change minimal (§ 4.2).
+
+`signatures` (every tool) and, for `apply`, `every commit tagged` DO walk
+`refs/heads`/`refs/tags`/HEAD, but — Q2 follow-up, Scout MUST on
+ba201494 — that is not actually a reason to run them after the move
+either: `verify.verifySignatures`/`verifyEveryCommitTagged` now take the
+PLANNED final ref map instead of reading live refs (the new sha for
+every ref the pending transaction is about to write, the CURRENT sha,
+read once before anything else, for every other branch/tag it leaves
+alone) and walk explicit shas throughout (`rev-list <sha>...`,
+`verify-tag <tag-object-sha>`), so they too are computed and checked
+before the transaction, in `apply`, `tail`, `replace` and `add-file`
+alike. Scout found this still moved a ref on a FAILED `signatures`: a
+second, wholly unrelated branch with one unsigned commit still fails the
+check (it always covered every branch/tag, not just the one this run
+touches), but `apply`/`tail` used to move their own branch and tags
+FIRST regardless. Confirmed live and fixed for `apply`/`tail`, pinned in
+AC-108. For `replace`/`add-file`, which re-sign every commit reachable
+from `--branches --tags` — the "unrelated" branch included — this
+trigger turned out not to reach a FAILED `signatures` there at all:
+confirmed empirically (a disposable fixture, same shape as Scout's),
+their full-history resign leaves no commit for a stale key to still be
+the one a verify-tag/-commit call rejects. The planned-ref-map code
+still runs there too (`§ 4.2` describes it uniformly, and it costs
+nothing idle), there is simply no live way left to force it to FAIL. No
+AC-108 leg claims one.
+
+On success, stdout is unchanged: the same verify lines, same text, same
+order, just computed earlier.
+
+The `checkOneTag`/`verifyNewSignatures` tag path (git-sign) previously
+read the live `refs/tags/<name>` ref to check a tag's signature, which
+would have made it ref-dependent for no real reason: `git verify-tag`
+takes a tag object's sha exactly as it takes a ref name, so moving the
+read to the already-known new tag sha (instead of enumerating
+`refs/tags` after the move) lost nothing and let this check move early
+too.
+
+AC-108 pins this: a one-shot `git` wrapper on PATH answers the first
+`rev-parse <sha>^{tree}` seen after a `commit-tree` call with the empty
+tree's sha, corrupting `tree delta`'s result for a reason unrelated to
+any tool's own logic; each of the five commands is checked for exit 1,
+one stderr line naming `tree delta: FAILED`, stdout only the `backup:`
+line, and every ref exactly as it was before the run. D23's exit-code
+proposal is updated to match: a pre-move verify FAILED now belongs with
+"1, nothing moved", not "3, refs moved, restore from the bundle".
+
+AC-108 also gained, for the Q2 follow-up: two more legs (`apply`, `tail`)
+building a real unrelated-unsigned-branch repo, no wrapper needed, same
+assertions (exit 1, one stderr line naming `signatures: FAILED`, stdout
+only the `backup:` line, every ref including the unrelated branch
+unchanged); and one leg for `resign-commits` with a policy naming a
+cert-only primary key whose only signing-capable key is a subkey (gpg
+signs with the subkey; the signature's own issuer fingerprint is a
+different 40-hex value, not a short form of the primary's, so `check`
+reports `wrong-key`) — a regression guard for the exact live
+misconfiguration Scout found by accident, not a new fix: `resign-commits`
+already closed this at D24/Q2 (ba201494), confirmed red only on the
+pre-D24 base (ef96e0d5), already green at ba201494.
+
+**Addendum (Q2 hardening, Reviewer SHOULD on 360babc5):** `signatures`'
+PLANNED final ref map above closed the race for `signatures`/`every
+commit tagged` themselves, but nothing re-checked an UNTOUCHED ref — one
+neither this run's own moves nor those two checks' planned map ever
+names, e.g. a wholly unrelated branch `apply`/`tail` never touch —
+between the one read that map came from and the ref transaction itself.
+`replace`/`add-file`'s own `refDrift` re-check (D20, Reviewer R1b) closes
+a similar window for THEM by re-reading refs right before the
+transaction, but that is a separate check, not a check IN the
+transaction, so a ref moving in the (much smaller) gap between that
+re-read and the transaction's own commit was still possible in theory —
+`squash` (`apply`/`tail`) had neither a re-check nor anything in the
+transaction at all for an untouched ref.
+
+Settled: every untouched ref in the planned map rides the SAME
+`update-ref --stdin` transaction as a `verify <ref> <sha>` line — git's
+own atomic check, right alongside the `update`/`create` lines the
+touched refs already use (`git.moveRefs`'s new `verifies` parameter,
+`git.RefVerify`). A FAILED verify aborts the WHOLE transaction, exactly
+like a FAILED `update`'s old-value check: nothing lands, not even this
+run's own moves, named on stderr by git itself, same refusal shape as
+any other transaction failure. Done in `apply`/`tail` (git-release-
+squash), which had nothing before; `replace`/`add-file`
+(git-history-rewrite) gained the same lines for the one hypothetical
+untouched ref their own remap loop already guards against (in practice
+none: every ref reachable from `--branches --tags` is remapped, since
+`commits` already walked that same universe) — `refDrift` is unchanged,
+now backed up by the transaction itself rather than being the only
+check; `resign-commits` (git-sign), which only ever touched refs
+reachable from the resign range, gained verify lines for every OTHER
+branch/tag read at the same point `affectedBranches`/`affectedTags` are
+filtered from.
+
+AC-108 gained three more legs, one per tool where an untouched ref is
+actually reachable (`resign-commits`, `apply`, `tail`; `replace`/
+`add-file` have none, per the remap argument above): a one-shot `git` on
+PATH, the same W3/W4 idiom, moves an untouched branch `other` to a fresh
+orphan commit right before handing the real `update-ref --stdin` call to
+the real git. Each leg: exit 1, stderr names `refs/heads/other`, this
+run's own branch stayed exactly where it was (the whole transaction
+refused), and `other` itself IS at its wrapper-moved value (that move
+happened via a separate git call, before and outside the transaction;
+the fix does not and cannot undo an external write the transaction never
+seemed as a part of itself) — confirmed red on 360babc5, green after.

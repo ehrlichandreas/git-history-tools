@@ -51,6 +51,19 @@ function defaultName(repo: string): string {
   return base;
 }
 
+/** Every `refs/heads/*` ref's own name and commit sha, in for-each-ref's
+ * own (refname) order -- read once, before any object is written, so the
+ * planned final ref map (D24, Q2 follow-up) has a CURRENT value for
+ * every branch this run does not touch. */
+function allBranchHeads(repo: string, env: Env): { ref: string; sha: string }[] {
+  const out = git.text(repo, ['for-each-ref', '--format=%(refname)\t%(objectname)', 'refs/heads'], { env });
+  if (!out) return [];
+  return out.split('\n').map((l) => {
+    const [ref, sha] = l.split('\t');
+    return { ref, sha };
+  });
+}
+
 /** In for-each-ref's own (refname) order. */
 function loadTagIndex(repo: string, env: Env): TagEntry[] {
   const out = git.text(repo,
@@ -221,9 +234,24 @@ function buildTag(repo: string, env: Env, signer: Signer, name: string, commit: 
   });
 }
 
-function moveRefsOrRefuse(repo: string, env: Env, message: string, moves: git.RefMove[]): void {
-  const r = git.moveRefs(repo, env, message, moves);
+function moveRefsOrRefuse(repo: string, env: Env, message: string, moves: git.RefMove[], verifies: git.RefVerify[] = []): void {
+  const r = git.moveRefs(repo, env, message, moves, verifies);
   if (r.status !== 0) throw new Refusal('ref update transaction failed: ' + (r.stderr as string).trim().split('\n')[0]);
+}
+
+/** Every entry of the planned final ref map (`heads`/`tags`, already
+ * built against the one read of the backlog's branches/tags this run
+ * used for its own `signatures` check) this run's own `moves` does NOT
+ * touch, as `git.RefVerify` -- for an untouched ref, "planned" and
+ * "current" are the same value by construction, so these are exactly
+ * the old values the ref transaction below must still see (Q2
+ * hardening). */
+function untouchedVerifies(moves: git.RefMove[], heads: verify.PlannedHead[], tags: verify.PlannedTag[]): git.RefVerify[] {
+  const touched = new Set(moves.map((m) => m.ref));
+  return [
+    ...heads.filter((h) => !touched.has(h.ref)).map((h) => ({ ref: h.ref, sha: h.sha })),
+    ...tags.filter((t) => !touched.has(t.ref)).map((t) => ({ ref: t.ref, sha: t.tagObj })),
+  ];
 }
 
 /** HEAD's branch as a FULL refname (`refs/heads/x`), never `--short`,
@@ -328,30 +356,59 @@ function cmdApply(bin: string, args: string[]): void {
     }
     const newHead = commitResults[commitResults.length - 1].nc;
 
+    /* `tree delta` (D24, Reviewer-found): computed against the new commits
+     * right above, before any ref moves -- a FAILED one is now a refusal
+     * in the usual shape (the backup bundle and the new commits stay,
+     * nothing moved), rather than moving every ref first and reporting a
+     * verify that failed on an already-moved history. */
+    const treeDelta = verify.verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree })));
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
+
     /* Every object first (the commits above, every tag object here), then
      * every ref in ONE transaction against its old value: a failure
      * anywhere moves nothing (D20, AC-74). `git tag -f -s` per tag used to
      * create the object and move its ref in one step. */
     const moves: git.RefMove[] = [];
+    const touchedTags = new Map<string, verify.PlannedTag>();
     for (const { g, nc, committerDate } of commitResults) {
       for (const t of g.tags) {
         const newObj = t.type === 'tag'
           ? buildTag(repo, Object.assign({}, env, { GIT_COMMITTER_DATE: committerDate }), signer, t.name, nc, tagRawMessage(repo, env, t.name))
           : nc;
         moves.push({ ref: 'refs/tags/' + t.name, newSha: newObj, oldSha: t.obj });
+        touchedTags.set(t.name, { ref: 'refs/tags/' + t.name, type: t.type, commit: nc, tagObj: newObj });
       }
     }
     moves.push({ ref: branch, newSha: newHead, oldSha: oldHead });
-    moveRefsOrRefuse(repo, env, 'git-release-squash apply', moves);
+
+    /* `signatures` and `every commit tagged` (D24, Q2 follow-up,
+     * Scout-found): checked against the PLANNED final ref map -- this
+     * run's own new values above, the CURRENT value (read before
+     * anything was written) for every other branch/tag -- before the
+     * transaction: a FAILED one here is a refusal (bundle and new
+     * objects kept, nothing moved), not a write whose refs already
+     * moved. An unrelated branch's own unsigned commit still fails
+     * `signatures` exactly as before (it is still checked, same as
+     * every branch/tag), just before the move instead of after. */
+    const plannedTags: verify.PlannedTag[] = tags.map((t) =>
+      touchedTags.get(t.name) || { ref: 'refs/tags/' + t.name, type: t.type, commit: t.commit, tagObj: t.obj });
+    const plannedHeads: verify.PlannedHead[] = allBranchHeads(repo, env).map((h) =>
+      h.ref === branch ? { ref: h.ref, sha: newHead } : h);
+    const signatures = verify.verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
+    const everyCommitTagged = verify.verifyEveryCommitTagged(repo, env, newHead, plannedTags);
+    if (!everyCommitTagged.ok) throw new Refusal(everyCommitTagged.line);
+
+    /* Every other branch/tag rides the SAME transaction as a `verify`
+     * line (Q2 hardening, Reviewer SHOULD): `signatures` above already
+     * read them once for its own planned map; nothing re-checked them
+     * between that read and this call until now. */
+    moveRefsOrRefuse(repo, env, 'git-release-squash apply', moves, untouchedVerifies(moves, plannedHeads, plannedTags));
     /* Only now: a failed transaction leaves no map of commits no ref
      * points at (D21, AC-85). Its directory was checked up front (AC-77). */
     fs.writeFileSync(mapPath, mapLines.length ? mapLines.join('\n') + '\n' : '');
 
-    const results = [
-      verify.verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree }))),
-      verify.verifySignatures(repo, env),
-      verify.verifyEveryCommitTagged(repo, env),
-    ];
+    const results = [treeDelta, signatures, everyCommitTagged];
     for (const r of results) process.stdout.write(r.line + '\n');
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {
@@ -453,21 +510,43 @@ function cmdTail(bin: string, args: string[]): void {
     });
     const newTree = git.text(repo, ['rev-parse', nc + '^{tree}'], { env });
 
+    /* `tree delta` (D24, Reviewer-found): computed against the new commit
+     * right above, before any ref moves -- a FAILED one is now a refusal
+     * in the usual shape, rather than moving every ref first and
+     * reporting a verify that failed on an already-moved history. */
+    const treeDelta = verify.verifyTreeDelta([{ label: headSha, expected: tree, actual: newTree }]);
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
+
     /* The commit, then the tag object, then both refs in ONE transaction
      * (D20, AC-74): the branch used to move first, so a tag that failed
      * left it moved and no tag. The tag ref must not exist yet. */
     const moves: git.RefMove[] = [{ ref: branch, newSha: nc, oldSha: headSha }];
+    const plannedTags: verify.PlannedTag[] = tags.map((t): verify.PlannedTag =>
+      ({ ref: 'refs/tags/' + t.name, type: t.type, commit: t.commit, tagObj: t.obj }));
     if (flags.tag !== undefined) {
       const tagEnv = dates === 'anon' ? Object.assign({}, env, { GIT_COMMITTER_DATE: whenC }) : env;
       const tagObj = buildTag(repo, tagEnv, signer, flags.tag as string, nc, tagMessageText as string);
       moves.push({ ref: 'refs/tags/' + flags.tag, newSha: tagObj, oldSha: null });
+      plannedTags.push({ ref: 'refs/tags/' + flags.tag, type: 'tag', commit: nc, tagObj });
     }
-    moveRefsOrRefuse(repo, env, 'git-release-squash tail', moves);
 
-    const results = [
-      verify.verifyTreeDelta([{ label: headSha, expected: tree, actual: newTree }]),
-      verify.verifySignatures(repo, env),
-    ];
+    /* `signatures` (D24, Q2 follow-up, Scout-found): checked against the
+     * PLANNED final ref map -- this run's own new branch tip and new tag
+     * (if any) above, the CURRENT value (read before anything was
+     * written) for every other branch/tag -- before the transaction: a
+     * FAILED one here is a refusal (bundle and new objects kept, nothing
+     * moved), not a write whose refs already moved. */
+    const plannedHeads: verify.PlannedHead[] = allBranchHeads(repo, env).map((h) =>
+      h.ref === branch ? { ref: h.ref, sha: nc } : h);
+    const signatures = verify.verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
+
+    /* Every other branch/tag rides the SAME transaction as a `verify`
+     * line (Q2 hardening, Reviewer SHOULD): see the matching comment in
+     * cmdApply. */
+    moveRefsOrRefuse(repo, env, 'git-release-squash tail', moves, untouchedVerifies(moves, plannedHeads, plannedTags));
+
+    const results = [treeDelta, signatures];
     for (const r of results) process.stdout.write(r.line + '\n');
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {

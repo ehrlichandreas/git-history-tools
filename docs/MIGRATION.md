@@ -118,3 +118,21 @@ the wrong label is gone. A source commit with an explicit `encoding
 UTF-8` header loses it in `replace`, and `resign-commits` refuses it
 (exit 1, nothing written) instead of moving the ref and failing its
 verify; run `replace` first to drop the header.
+
+# Migrating from v0.4.5 to v0.4.6
+
+A script that assumed a FAILED verify line on `resign-commits --apply`,
+`apply --apply`, `tail --apply`, `replace --apply` or `add-file --apply`
+always meant the refs had already moved (the backup bundle the only way
+back) can no longer assume that. `tree delta`, and for `resign-commits`
+also `headers preserved`/`parents mapped`/`check (signature/sig-time)`,
+are now checked before the ref transaction: a FAILED one there is exit 1
+with no ref moved at all, same as any other refusal after the bundle. A
+script that recovers from one of these exits by restoring the bundle
+still works (the bundle is still there, unchanged), but one that
+*assumed* it was necessary should check whether any ref actually moved
+first (`git for-each-ref`) rather than restoring unconditionally.
+
+Only `signatures` and, for `apply`, `every commit tagged` still mean the
+refs moved when they FAIL. On success, output is byte-identical to
+v0.4.5.

@@ -101,11 +101,12 @@ function topLevel(dir) {
   const t = run(dir, ["rev-parse", "--show-toplevel"]);
   return t.status === 0 ? t.stdout.replace(/\n$/, "") : null;
 }
-function moveRefs(repo, env, message, moves) {
+function moveRefs(repo, env, message, moves, verifies = []) {
   const lines = ["start"];
   for (const m of moves) {
     lines.push(m.oldSha === null ? "create " + m.ref + " " + m.newSha : "update " + m.ref + " " + m.newSha + " " + m.oldSha);
   }
+  for (const v of verifies) lines.push("verify " + v.ref + " " + v.sha);
   lines.push("prepare", "commit");
   return run(repo, ["update-ref", "-m", message, "--stdin"], { env, input: lines.join("\n") + "\n" });
 }
@@ -376,33 +377,25 @@ function verifyTreeDelta(checks) {
   }
   return line("tree delta", true);
 }
-function verifySignatures(repo, env) {
-  const commitsRaw = text(repo, ["rev-list", "--branches", "--tags"], { env });
+function verifySignatures(repo, env, heads, tags) {
+  const tips = heads.map((h) => h.sha).concat(tags.map((t) => t.commit));
+  const commitsRaw = tips.length ? text(repo, ["rev-list"].concat(tips), { env }) : "";
   const commits = commitsRaw ? commitsRaw.split("\n") : [];
   for (const c of commits) {
     const r = run(repo, ["verify-commit", c], { env });
     if (r.status !== 0) return line("signatures", false, "verify-commit " + c.slice(0, 7) + " failed: " + r.stderr.trim());
   }
-  const tagsRaw = text(repo, ["for-each-ref", "--format=%(refname)	%(objecttype)", "refs/tags"], { env });
-  const tags = tagsRaw ? tagsRaw.split("\n") : [];
-  for (const l of tags) {
-    const [ref, type] = l.split("	");
-    if (type !== "tag") continue;
-    const name = refBase(ref, "refs/tags/");
-    const r = run(repo, ["verify-tag", ref], { env });
-    if (r.status !== 0) return line("signatures", false, "verify-tag " + name + " failed: " + r.stderr.trim());
+  for (const t of tags) {
+    if (t.type !== "tag") continue;
+    const r = run(repo, ["verify-tag", t.tagObj], { env });
+    if (r.status !== 0) return line("signatures", false, "verify-tag " + refBase(t.ref, "refs/tags/") + " failed: " + r.stderr.trim());
   }
   return line("signatures", true);
 }
-function verifyEveryCommitTagged(repo, env) {
-  const commitsRaw = text(repo, ["rev-list", "HEAD"], { env });
+function verifyEveryCommitTagged(repo, env, headSha, tags) {
+  const commitsRaw = text(repo, ["rev-list", headSha], { env });
   const commits = new Set(commitsRaw ? commitsRaw.split("\n") : []);
-  const tagsRaw = text(repo, ["for-each-ref", "--format=%(*objectname)	%(objectname)", "refs/tags"], { env });
-  const taggedCommits = /* @__PURE__ */ new Set();
-  for (const l of tagsRaw ? tagsRaw.split("\n") : []) {
-    const [deref, obj] = l.split("	");
-    taggedCommits.add(deref || obj);
-  }
+  const taggedCommits = new Set(tags.map((t) => t.commit));
   for (const c of commits) {
     if (!taggedCommits.has(c)) return line("squash: every commit tagged", false, c.slice(0, 7) + " is not tagged");
   }
@@ -429,6 +422,14 @@ function defaultName(repo) {
   let base = path5.basename(path5.resolve(repo));
   if (base.endsWith(".git")) base = base.slice(0, -4);
   return base;
+}
+function allBranchHeads(repo, env) {
+  const out = text(repo, ["for-each-ref", "--format=%(refname)	%(objectname)", "refs/heads"], { env });
+  if (!out) return [];
+  return out.split("\n").map((l) => {
+    const [ref, sha] = l.split("	");
+    return { ref, sha };
+  });
 }
 function loadTagIndex(repo, env) {
   const out = text(
@@ -547,9 +548,16 @@ function buildTag(repo, env, signer, name, commit, message) {
     message: cleanTagMessage(repo, env, message)
   });
 }
-function moveRefsOrRefuse(repo, env, message, moves) {
-  const r = moveRefs(repo, env, message, moves);
+function moveRefsOrRefuse(repo, env, message, moves, verifies = []) {
+  const r = moveRefs(repo, env, message, moves, verifies);
   if (r.status !== 0) throw new Refusal("ref update transaction failed: " + r.stderr.trim().split("\n")[0]);
+}
+function untouchedVerifies(moves, heads, tags) {
+  const touched = new Set(moves.map((m) => m.ref));
+  return [
+    ...heads.filter((h) => !touched.has(h.ref)).map((h) => ({ ref: h.ref, sha: h.sha })),
+    ...tags.filter((t) => !touched.has(t.ref)).map((t) => ({ ref: t.ref, sha: t.tagObj }))
+  ];
 }
 function currentBranch(repo, env) {
   const r = run(repo, ["symbolic-ref", "HEAD"], { env });
@@ -634,21 +642,27 @@ function cmdApply(bin, args) {
       idx++;
     }
     const newHead = commitResults[commitResults.length - 1].nc;
+    const treeDelta = verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree })));
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
     const moves = [];
+    const touchedTags = /* @__PURE__ */ new Map();
     for (const { g, nc, committerDate } of commitResults) {
       for (const t of g.tags) {
         const newObj = t.type === "tag" ? buildTag(repo, Object.assign({}, env, { GIT_COMMITTER_DATE: committerDate }), signer, t.name, nc, tagRawMessage(repo, env, t.name)) : nc;
         moves.push({ ref: "refs/tags/" + t.name, newSha: newObj, oldSha: t.obj });
+        touchedTags.set(t.name, { ref: "refs/tags/" + t.name, type: t.type, commit: nc, tagObj: newObj });
       }
     }
     moves.push({ ref: branch, newSha: newHead, oldSha: oldHead });
-    moveRefsOrRefuse(repo, env, "git-release-squash apply", moves);
+    const plannedTags = tags.map((t) => touchedTags.get(t.name) || { ref: "refs/tags/" + t.name, type: t.type, commit: t.commit, tagObj: t.obj });
+    const plannedHeads = allBranchHeads(repo, env).map((h) => h.ref === branch ? { ref: h.ref, sha: newHead } : h);
+    const signatures = verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
+    const everyCommitTagged = verifyEveryCommitTagged(repo, env, newHead, plannedTags);
+    if (!everyCommitTagged.ok) throw new Refusal(everyCommitTagged.line);
+    moveRefsOrRefuse(repo, env, "git-release-squash apply", moves, untouchedVerifies(moves, plannedHeads, plannedTags));
     fs4.writeFileSync(mapPath, mapLines.length ? mapLines.join("\n") + "\n" : "");
-    const results = [
-      verifyTreeDelta(commitResults.map((r) => ({ label: r.g.tip, expected: r.origTree, actual: r.newTree }))),
-      verifySignatures(repo, env),
-      verifyEveryCommitTagged(repo, env)
-    ];
+    const results = [treeDelta, signatures, everyCommitTagged];
     for (const r of results) process.stdout.write(r.line + "\n");
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {
@@ -732,17 +746,21 @@ function cmdTail(bin, args) {
       config: signer.gitConfig
     });
     const newTree = text(repo, ["rev-parse", nc + "^{tree}"], { env });
+    const treeDelta = verifyTreeDelta([{ label: headSha, expected: tree, actual: newTree }]);
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
     const moves = [{ ref: branch, newSha: nc, oldSha: headSha }];
+    const plannedTags = tags.map((t) => ({ ref: "refs/tags/" + t.name, type: t.type, commit: t.commit, tagObj: t.obj }));
     if (flags.tag !== void 0) {
       const tagEnv = dates === "anon" ? Object.assign({}, env, { GIT_COMMITTER_DATE: whenC }) : env;
       const tagObj = buildTag(repo, tagEnv, signer, flags.tag, nc, tagMessageText);
       moves.push({ ref: "refs/tags/" + flags.tag, newSha: tagObj, oldSha: null });
+      plannedTags.push({ ref: "refs/tags/" + flags.tag, type: "tag", commit: nc, tagObj });
     }
-    moveRefsOrRefuse(repo, env, "git-release-squash tail", moves);
-    const results = [
-      verifyTreeDelta([{ label: headSha, expected: tree, actual: newTree }]),
-      verifySignatures(repo, env)
-    ];
+    const plannedHeads = allBranchHeads(repo, env).map((h) => h.ref === branch ? { ref: h.ref, sha: nc } : h);
+    const signatures = verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
+    moveRefsOrRefuse(repo, env, "git-release-squash tail", moves, untouchedVerifies(moves, plannedHeads, plannedTags));
+    const results = [treeDelta, signatures];
     for (const r of results) process.stdout.write(r.line + "\n");
     process.exitCode = results.some((r) => !r.ok) ? 1 : 0;
   } finally {

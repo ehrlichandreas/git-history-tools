@@ -1205,7 +1205,7 @@ function checkOneTag(repo, env, t, policy, gpgProgram) {
     out.push(t.name + " signature multiple-signatures (" + sigBlocks + " signature blocks found)");
   } else {
     const sig = extractSignature(repo, env, "tag", t.obj);
-    const status = signatureStatus(repo, env, "tag", "refs/tags/" + t.name, sig !== null, policy.signingKey);
+    const status = signatureStatus(repo, env, "tag", t.obj, sig !== null, policy.signingKey);
     if (status.state !== "ok") {
       out.push(t.name + " signature " + signatureDetail(status));
     } else if (sig) {
@@ -1334,16 +1334,16 @@ function verifyParentsMapped(repo, env, pairs, parsed) {
   }
   return { ok: true, line: "verify: resign-commits: parents mapped: OK" };
 }
-function verifyNewSignatures(repo, env, gpgProgram, policy, pairs, movedTagNames) {
+function verifyNewSignatures(repo, env, gpgProgram, policy, pairs, tagResults) {
   const bad = [];
   for (const p of pairs) {
     for (const l of checkOneCommit(repo, env, p.nw, policy, gpgProgram)) {
       if (/ (signature|sig-time) /.test(l)) bad.push(l);
     }
   }
-  for (const t of annotatedTags(repo, env)) {
-    if (t.type !== "tag" || !movedTagNames.has(t.name)) continue;
-    for (const l of checkOneTag(repo, env, t, policy, gpgProgram)) {
+  for (const r of tagResults) {
+    if (r.type !== "tag") continue;
+    for (const l of checkOneTag(repo, env, { name: r.name, type: "tag", obj: r.newSha, commit: "" }, policy, gpgProgram)) {
       if (/ (signature|sig-time) /.test(l)) bad.push(l);
     }
   }
@@ -1434,7 +1434,8 @@ function cmdResignCommits(bin, args) {
     return { name: refBase(l.slice(0, sp), "refs/heads/"), sha: l.slice(sp + 1) };
   }) : [];
   const affectedBranches = branches.filter((b) => rewriteSet.has(b.sha));
-  const affectedTags = annotatedTags(repo, env).filter((t) => rewriteSet.has(t.commit));
+  const allTags = annotatedTags(repo, env);
+  const affectedTags = allTags.filter((t) => rewriteSet.has(t.commit));
   refuseNonUtf8(repo, env, [
     ...toRewrite.map((c) => ({ sha: c, label: "commit " + c.slice(0, 7) })),
     ...affectedTags.filter((t) => t.type === "tag").map((t) => ({ sha: t.obj, label: "tag " + t.name }))
@@ -1593,12 +1594,28 @@ function cmdResignCommits(bin, args) {
         throw new Refusal("could not resolve tag dependency order for: " + Array.from(pending).join(", "));
       }
     }
+    const results = [
+      verifyTreeDelta(pairs.map((p) => ({ label: p.old, expected: p.origTree, actual: p.newTree }))),
+      verifyHeadersPreserved(repo, env, pairs),
+      verifyParentsMapped(repo, env, pairs, parsed),
+      verifyNewSignatures(repo, env, gpgProgram, policy, pairs, tagResults)
+    ];
+    const failed = results.find((res) => !res.ok);
+    if (failed) throw new Refusal(failed.line);
     const stdinLines = ["start"];
     for (const b of affectedBranches) {
       stdinLines.push("update refs/heads/" + b.name + " " + newHeadOf(b.sha) + " " + b.sha);
     }
     for (const r of tagResults) {
       stdinLines.push("update refs/tags/" + r.name + " " + r.newSha + " " + r.oldSha);
+    }
+    const affectedBranchNames = new Set(affectedBranches.map((b) => b.name));
+    for (const b of branches) {
+      if (!affectedBranchNames.has(b.name)) stdinLines.push("verify refs/heads/" + b.name + " " + b.sha);
+    }
+    const affectedTagNames = new Set(affectedTags.map((t) => t.name));
+    for (const t of allTags) {
+      if (!affectedTagNames.has(t.name)) stdinLines.push("verify refs/tags/" + t.name + " " + t.obj);
     }
     stdinLines.push("prepare", "commit");
     const txn = run(repo, ["update-ref", "--stdin"], { env, input: stdinLines.join("\n") + "\n" });
@@ -1609,13 +1626,6 @@ function cmdResignCommits(bin, args) {
       const mapLines = pairs.map((p) => p.old + " " + p.nw).concat(tagResults.map((r) => r.oldSha + " " + r.newSha));
       fs5.writeFileSync(flags["map-out"], mapLines.length ? mapLines.join("\n") + "\n" : "");
     }
-    const movedTagNames = new Set(affectedTags.map((t) => t.name));
-    const results = [
-      verifyTreeDelta(pairs.map((p) => ({ label: p.old, expected: p.origTree, actual: p.newTree }))),
-      verifyHeadersPreserved(repo, env, pairs),
-      verifyParentsMapped(repo, env, pairs, parsed),
-      verifyNewSignatures(repo, env, gpgProgram, policy, pairs, movedTagNames)
-    ];
     for (const r of results) process.stdout.write(r.line + "\n");
     for (const p of pairs) {
       process.stdout.write("resign-commits: " + p.old.slice(0, 7) + " -> " + p.nw.slice(0, 7) + (p.old === p.nw ? " (unchanged)" : "") + "\n");

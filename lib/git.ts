@@ -165,15 +165,30 @@ export interface RefMove {
   oldSha: string | null;
 }
 
+/** A ref the transaction does not move, but still checks: `ref` must still
+ * be at `sha` when the transaction commits, same as any `update` line's
+ * old value, just with no new value to write (Q2 hardening). */
+export interface RefVerify {
+  ref: string;
+  sha: string;
+}
+
 /** Moves every ref in `moves` in ONE `update-ref --stdin` transaction, each
  * checked against its old value: all of them or none (D20, AC-74; the same
- * shape git-sign's resign-* use). Never throws; the caller turns a
- * non-zero status into its own refusal. */
-export function moveRefs(repo: string, env: NodeJS.ProcessEnv, message: string, moves: RefMove[]): RunResult {
+ * shape git-sign's resign-* use). `verifies` rides the SAME transaction
+ * (git's own atomic check, `verify <ref> <sha>`): every other ref the
+ * caller's own planned final state names, so a ref this run never
+ * touches that moved between the snapshot the plan was built from and
+ * this call still aborts the whole transaction, named in the error,
+ * rather than landing on a plan that assumed a since-stale value for it
+ * (Q2 hardening, Reviewer SHOULD on D24). Never throws; the caller turns
+ * a non-zero status into its own refusal. */
+export function moveRefs(repo: string, env: NodeJS.ProcessEnv, message: string, moves: RefMove[], verifies: RefVerify[] = []): RunResult {
   const lines = ['start'];
   for (const m of moves) {
     lines.push(m.oldSha === null ? 'create ' + m.ref + ' ' + m.newSha : 'update ' + m.ref + ' ' + m.newSha + ' ' + m.oldSha);
   }
+  for (const v of verifies) lines.push('verify ' + v.ref + ' ' + v.sha);
   lines.push('prepare', 'commit');
   return run(repo, ['update-ref', '-m', message, '--stdin'], { env, input: lines.join('\n') + '\n' });
 }

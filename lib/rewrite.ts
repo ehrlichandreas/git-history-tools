@@ -407,6 +407,21 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
       remap.set(r.oldSha, nc);
     }
 
+    /* `tree delta` (D24, Reviewer-found): computed against the new
+     * commits right above, before any ref moves (and before the tag
+     * objects below, which need not be built at all on a doomed run) --
+     * a FAILED one is now a refusal in the usual shape (the backup
+     * bundle and the new commits stay, nothing moved), rather than
+     * moving every ref first and reporting a verify that failed on an
+     * already-moved history. */
+    const treeChecks = records.map((r) => ({
+      label: r.oldSha,
+      expected: r.finalTree,
+      actual: git.text(repo, ['rev-parse', remap.get(r.oldSha) + '^{tree}'], { env }),
+    }));
+    const treeDelta = verify.verifyTreeDelta(treeChecks);
+    if (!treeDelta.ok) throw new Refusal(treeDelta.line);
+
     /* Every object first (the commits above, every tag object here), then
      * every ref in ONE transaction against its old value: a failure
      * anywhere moves nothing (D20, AC-74). `git tag -f -s` per tag used to
@@ -415,13 +430,23 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
      * for byte (AC-71). */
     const { heads, tags } = snapshot;
     const moves: git.RefMove[] = [];
+    const plannedHeads: verify.PlannedHead[] = [];
+    const plannedTags: verify.PlannedTag[] = [];
+    /* A head/tag whose own commit never turns up in `remap` -- in
+     * practice none, since `commits` already walked this same
+     * `--branches --tags` universe, but the guard below exists for an
+     * edge case `remap` would not cover (e.g. a tag on a tree/blob) --
+     * is left untouched; it rides the transaction below as a `verify`
+     * line instead of a move (Q2 hardening, Reviewer SHOULD). */
+    const verifies: git.RefVerify[] = [];
     for (const h of heads) {
       const newSha = remap.get(h.sha);
-      if (newSha) moves.push({ ref: h.ref, newSha, oldSha: h.sha });
+      if (newSha) { moves.push({ ref: h.ref, newSha, oldSha: h.sha }); plannedHeads.push({ ref: h.ref, sha: newSha }); }
+      else verifies.push({ ref: h.ref, sha: h.sha });
     }
     for (const t of tags) {
       const newCommit = remap.get(t.commit);
-      if (!newCommit) continue;
+      if (!newCommit) { verifies.push({ ref: t.ref, sha: t.tagObj }); continue; }
       let newObj = newCommit;
       if (t.type === 'tag') {
         const raw = git.text(repo, ['cat-file', '-p', t.tagObj], { env });
@@ -431,14 +456,24 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
         });
       }
       moves.push({ ref: t.ref, newSha: newObj, oldSha: t.tagObj });
+      plannedTags.push({ ref: t.ref, type: t.type, commit: newCommit, tagObj: newObj });
     }
+    /* `signatures` (D24, Q2 follow-up, Scout-found): every reachable
+     * commit and annotated tag is now checked against the PLANNED final
+     * ref map -- every `remap`ped head/tag above, by construction every
+     * head and tag there is since `commits` already walked the same
+     * `--branches --tags` universe -- before the transaction: a FAILED
+     * one here is a refusal (bundle and new objects kept, nothing
+     * moved), not a write whose refs already moved. */
+    const signatures = verify.verifySignatures(repo, env, plannedHeads, plannedTags);
+    if (!signatures.ok) throw new Refusal(signatures.line);
     /* The drift check comes after the last tag is signed, right before the
      * transaction (D20, Reviewer R1b): signing can take seconds (pinentry,
      * a smartcard), and a ref created meanwhile is in neither the snapshot
      * nor the transaction, so it would stay on the old history (AC-91). */
     const drift = refDrift(snapshot, refTips(repo, env));
     if (drift.length > 0) throw new Refusal('refs changed during the run (' + drift.join(', ') + '); nothing moved, run it again');
-    const txn = git.moveRefs(repo, env, bin + ' ' + sub, moves);
+    const txn = git.moveRefs(repo, env, bin + ' ' + sub, moves, verifies);
     if (txn.status !== 0) throw new Refusal('ref update transaction failed: ' + (txn.stderr as string).trim().split('\n')[0]);
     /* A ref created between that check and the transaction is not covered
      * by either: name it, exit 1. A moved or deleted one fails the
@@ -453,12 +488,7 @@ function runRewrite(bin: string, sub: string, repo: string, env: Env, opts: Rewr
       process.stderr.write(bin + ': ' + x.ref + ' created during the run' + (remap.has(x.target) ? ', still on the old history' : '') + '\n');
     }
 
-    const treeChecks = records.map((r) => ({
-      label: r.oldSha,
-      expected: r.finalTree,
-      actual: git.text(repo, ['rev-parse', remap.get(r.oldSha) + '^{tree}'], { env }),
-    }));
-    const results = [verify.verifyTreeDelta(treeChecks), verify.verifySignatures(repo, env)];
+    const results = [treeDelta, signatures];
     if (opts.ruleSourcesCheck) results.push(verify.verifyRuleSourcesClean(opts.ruleSourcesCheck));
     for (const r of results) process.stdout.write(r.line + '\n');
     process.exitCode = results.some((r) => !r.ok) || late.length > 0 ? 1 : 0;

@@ -3,6 +3,37 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.6
+
+- Fix: `resign-commits --apply`, `apply --apply`, `tail --apply`,
+  `replace --apply` and `add-file --apply` moved every ref before
+  computing their verify lines; a FAILED one left the refs already
+  moved, exit 1, the backup bundle the only way back. Every check that
+  only reads the new objects by sha (`tree delta`, and for
+  `resign-commits` also `headers preserved`/`parents mapped`/`check
+  (signature/sig-time)`) is now checked before the ref transaction: a
+  FAILED one is a refusal with no ref moved, same as a refusal before
+  the bundle. Stdout on success is unchanged (D24).
+- Fix: `signatures` and, for `apply`, `every commit tagged` also moved
+  before the ref transaction, checked against the planned final ref
+  map instead of the live one: `apply --apply` and `tail --apply` could
+  still move their own branch and tags before a FAILED `signatures` on
+  a second, unrelated branch's own unsigned commit (the check has
+  always covered the whole repo, not just the ref being moved) — fixed.
+  `replace`/`add-file` re-sign every reachable commit, including an
+  "unrelated" one, so this could not actually be forced there in
+  practice; their own checks moved too, for the same reason, but change
+  nothing observable. Stdout on success is unchanged (D24).
+- Fix: an untouched ref -- one neither this run's own moves nor its
+  planned final ref map's own checks touch -- could still drift between
+  the one read that map came from and the ref transaction landing,
+  unnoticed. `apply --apply`, `tail --apply`, `resign-commits --apply`
+  and, for one hypothetical edge case, `replace --apply`/`add-file
+  --apply` now carry a `verify <ref> <sha>` line in the SAME transaction
+  for every such ref: a drifted one aborts the whole transaction, named
+  on stderr, same as any other transaction failure -- nothing moves, not
+  even this run's own planned refs (Q2 hardening).
+
 ## 0.4.5
 
 - Fix: `git-release-squash tail` dates its new commit by its position

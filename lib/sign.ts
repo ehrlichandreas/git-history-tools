@@ -725,7 +725,11 @@ function checkOneTag(repo: string, env: Env, t: AnnotatedRef, policy: Policy, gp
     out.push(t.name + ' signature multiple-signatures (' + sigBlocks + ' signature blocks found)');
   } else {
     const sig = extractSignature(repo, env, 'tag', t.obj);
-    const status = signatureStatus(repo, env, 'tag', 'refs/tags/' + t.name, sig !== null, policy.signingKey);
+    /* `t.obj` itself, never `'refs/tags/' + t.name` -- `git verify-tag`
+     * takes either equally well, and the object sha works whether or not
+     * a ref points at it yet (resign-commits' pre-move verify, below,
+     * checks a brand new tag object before any ref is moved to it). */
+    const status = signatureStatus(repo, env, 'tag', t.obj, sig !== null, policy.signingKey);
     if (status.state !== 'ok') {
       out.push(t.name + ' signature ' + signatureDetail(status));
     } else if (sig) {
@@ -901,18 +905,25 @@ function verifyParentsMapped(repo: string, env: Env, pairs: { old: string; nw: s
  * already written to the repo by this point in `--apply`, filtering for
  * just the two rules a re-sign could possibly get wrong (identity/date/
  * message are untouched by a re-sign, so re-checking them here would only
- * re-verify something this command never had the power to break). */
+ * re-verify something this command never had the power to break).
+ *
+ * Takes `tagResults` directly, never `annotatedTags(repo, env)` -- that
+ * reads `refs/tags` as it stands right now, which (D24) is still the OLD
+ * tag before the ref transaction moves it. `tagResults` already names
+ * each new tag object's own sha, written but not yet ref-pointed-at; with
+ * `checkOneTag` reading `t.obj` directly (never the ref) this runs
+ * correctly before the move, same as the commit half above always could. */
 function verifyNewSignatures(repo: string, env: Env, gpgProgram: string, policy: Policy,
-  pairs: { nw: string }[], movedTagNames: Set<string>): verify.VerifyResult {
+  pairs: { nw: string }[], tagResults: { name: string; type: string; newSha: string }[]): verify.VerifyResult {
   const bad: string[] = [];
   for (const p of pairs) {
     for (const l of checkOneCommit(repo, env, p.nw, policy, gpgProgram)) {
       if (/ (signature|sig-time) /.test(l)) bad.push(l);
     }
   }
-  for (const t of annotatedTags(repo, env)) {
-    if (t.type !== 'tag' || !movedTagNames.has(t.name)) continue;
-    for (const l of checkOneTag(repo, env, t, policy, gpgProgram)) {
+  for (const r of tagResults) {
+    if (r.type !== 'tag') continue;
+    for (const l of checkOneTag(repo, env, { name: r.name, type: 'tag', obj: r.newSha, commit: '' }, policy, gpgProgram)) {
       if (/ (signature|sig-time) /.test(l)) bad.push(l);
     }
   }
@@ -1034,7 +1045,8 @@ function cmdResignCommits(bin: string, args: string[]): void {
     return { name: git.refBase(l.slice(0, sp), 'refs/heads/'), sha: l.slice(sp + 1) };
   }) : [];
   const affectedBranches = branches.filter((b) => rewriteSet.has(b.sha));
-  const affectedTags = annotatedTags(repo, env).filter((t) => rewriteSet.has(t.commit));
+  const allTags = annotatedTags(repo, env);
+  const affectedTags = allTags.filter((t) => rewriteSet.has(t.commit));
   /* Every commit re-signed and every tag re-created on them: UTF-8 only (D21, AC-95). */
   refuseNonUtf8(repo, env, [
     ...toRewrite.map((c) => ({ sha: c, label: 'commit ' + c.slice(0, 7) })),
@@ -1248,15 +1260,43 @@ function cmdResignCommits(bin: string, args: string[]): void {
       }
     }
 
+    /* Every verify line (D24, Reviewer-found) computed against the new
+     * objects ABOVE -- commits and tag objects both already exist, no ref
+     * touched yet -- and checked BEFORE the ref transaction: a FAILED one
+     * is now a refusal in the usual shape, same as any other D20 refusal
+     * (the backup bundle and the new objects stay, nothing moved), rather
+     * than moving every ref and only then reporting a verify that failed
+     * on an already-moved history with just the bundle to undo it. */
+    const results = [
+      verify.verifyTreeDelta(pairs.map((p) => ({ label: p.old, expected: p.origTree, actual: p.newTree }))),
+      verifyHeadersPreserved(repo, env, pairs),
+      verifyParentsMapped(repo, env, pairs, parsed),
+      verifyNewSignatures(repo, env, gpgProgram, policy, pairs, tagResults),
+    ];
+    const failed = results.find((res) => !res.ok);
+    if (failed) throw new Refusal(failed.line);
+
     /* ONE atomic transaction for every branch and tag move (HIGH fix):
      * every new object already exists above, this only moves refs, each
-     * checked against its current (old) value, all-or-nothing. */
+     * checked against its current (old) value, all-or-nothing. Every
+     * OTHER branch/tag -- read once, into `branches`/`allTags`, before
+     * any object above was built -- rides the SAME transaction as a
+     * `verify` line: nothing re-checked them since that read, until now
+     * (Q2 hardening, Reviewer SHOULD). */
     const stdinLines: string[] = ['start'];
     for (const b of affectedBranches) {
       stdinLines.push('update refs/heads/' + b.name + ' ' + newHeadOf(b.sha) + ' ' + b.sha);
     }
     for (const r of tagResults) {
       stdinLines.push('update refs/tags/' + r.name + ' ' + r.newSha + ' ' + r.oldSha);
+    }
+    const affectedBranchNames = new Set(affectedBranches.map((b) => b.name));
+    for (const b of branches) {
+      if (!affectedBranchNames.has(b.name)) stdinLines.push('verify refs/heads/' + b.name + ' ' + b.sha);
+    }
+    const affectedTagNames = new Set(affectedTags.map((t) => t.name));
+    for (const t of allTags) {
+      if (!affectedTagNames.has(t.name)) stdinLines.push('verify refs/tags/' + t.name + ' ' + t.obj);
     }
     stdinLines.push('prepare', 'commit');
     const txn = git.run(repo, ['update-ref', '--stdin'], { env, input: stdinLines.join('\n') + '\n' });
@@ -1269,13 +1309,6 @@ function cmdResignCommits(bin: string, args: string[]): void {
       fs.writeFileSync(flags['map-out'] as string, mapLines.length ? mapLines.join('\n') + '\n' : '');
     }
 
-    const movedTagNames = new Set(affectedTags.map((t) => t.name));
-    const results = [
-      verify.verifyTreeDelta(pairs.map((p) => ({ label: p.old, expected: p.origTree, actual: p.newTree }))),
-      verifyHeadersPreserved(repo, env, pairs),
-      verifyParentsMapped(repo, env, pairs, parsed),
-      verifyNewSignatures(repo, env, gpgProgram, policy, pairs, movedTagNames),
-    ];
     for (const r of results) process.stdout.write(r.line + '\n');
     for (const p of pairs) {
       process.stdout.write('resign-commits: ' + p.old.slice(0, 7) + ' -> ' + p.nw.slice(0, 7) + (p.old === p.nw ? ' (unchanged)' : '') + '\n');
