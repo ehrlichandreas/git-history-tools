@@ -1,7 +1,7 @@
 {
   "name": "git-history-tools",
   "private": true,
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Four tools for preparing a git history for publication: git-release-squash, git-leak-scan, git-history-rewrite, git-sign.",
   "type": "module",
   "engines": {

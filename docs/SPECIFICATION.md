@@ -329,10 +329,10 @@ defeating the anonymisation `--dates=anon` exists for):
 Synopsis (`git-leak-scan --help`, § 0):
 
 ```
-git-leak-scan scan <repo> [--terms <file>] [--allow <file>]
+git-leak-scan scan <repo> [--terms <file>] [--allow <file>] [--range <range>] [--only <a,b,...>]
 ```
 
-### 2.1 `scan <repo> [--terms <file>] [--allow <file>]`
+### 2.1 `scan <repo> [--terms <file>] [--allow <file>] [--range <range>] [--only <a,b,...>]`
 
 Searches every blob reachable from any ref, every commit message, every
 annotated tag message, and every author/committer/tagger identity line
@@ -425,12 +425,46 @@ once (D22, AC-89).
 skipped); any hit whose `<match>` equals a line in this file, verbatim, is
 suppressed entirely (not printed, not counted towards the exit code).
 
+`--range <range>` narrows the whole scan above to what `<range>` brings in:
+the commits `git rev-list <range>` lists (their message and identity
+lines unchanged from the whole-history scan), and, per text file each such
+commit touches, only the lines that commit itself adds relative to its
+first parent (the empty tree for a root commit; for a merge, a line counts
+as added only when it is new against every parent at once — git's combined
+diff) — rename detection is on, so a pure rename (no content change) adds
+nothing for that path, and an old, unchanged line is never rescanned just
+because its file changed elsewhere. A binary file keeps the whole-history
+rule instead (a line-level diff makes no sense for it): its new blob, at a
+range commit that changes it, is read and scanned once in full. An
+annotated tag counts only when its own target commit is itself in the
+range. `<count>` and `first at` are computed only over commits in the
+range. Without `--range`, the scan is unchanged: the whole history, every
+blob read whole as before. `<range>` is hardened exactly like `git-sign
+check`'s own
+`<range>` (§ 5.4, D20): a usage error (exit 2), before `<repo>` is even
+read, if `<range>` or either side of `..`/`...` starts with `-` (git would
+otherwise read it as an option); every git call reads `<range>` only after
+`--end-of-options` as a second line of defence. An unknown revision is a
+refusal (exit 1, no scanning performed). A syntactically valid range that
+brings in no commits scans nothing — exit 0, with one line on stderr
+naming the empty range.
+
+`--only <a,b,...>`: a comma-separated list from the closed category
+vocabulary above (`email`, `url`, `local-path`, `hostname`, `ip`,
+`secret`, `term`) — only those categories are reported, and only their
+hits are counted towards the exit code. List items are not trimmed, so a
+surrounding space is itself an unknown category. An empty item (an empty
+list, or one either side of a leading, trailing or doubled comma), an
+unknown category, or `term` without `--terms` is a usage error (exit 2),
+before `<repo>` is read. Without `--only`, every category is reported, as
+before.
+
 Exit 0 when zero hits remain after allowlisting; exit 1 when at least one
 hit remains (hits are still all printed before exiting 1); exit 2 on a
-usage error (bad flag, `--terms`/`--allow` file does not exist). Refuses
-(exit 1, no scanning performed) if `--terms` or `--allow` resolves to a
-path inside `<repo>` (§ 4.4) — printed before any hit, as the sole output
-line.
+usage error (bad flag, `--terms`/`--allow` file does not exist, a bad
+`--range` or `--only`). Refuses (exit 1, no scanning performed) if
+`--terms` or `--allow` resolves to a path inside `<repo>` (§ 4.4) —
+printed before any hit, as the sole output line.
 
 ## 3. git-history-rewrite (`bin/git-history-rewrite`)
 
@@ -1363,3 +1397,4 @@ tools exist, any `CANNOT RUN` makes the run exit 1 (D19, AC-69).
 | AC-106 | ac-106-no-encoding-header.ts | no `encoding` header (§ 0, D21, D23): in a repo whose history has no header and `i18n.commitEncoding=ISO-8859-1` set afterwards, `apply --apply` (two tags), `tail --tag --apply`, `replace --apply`, `resign-commits --apply` and git-sign `commit --apply` exit 0 and every commit they write has no `encoding` header and its message's `café` as UTF-8 (`c3 a9`); with `i18n.logOutputEncoding=ISO-8859-1` alone, `replace --apply` keeps the message's UTF-8 bytes, `scan --terms` with `café` hits it and git-sign `check` matches a `café` message pattern; red on 032c397; mutation-tested |
 | AC-107 | ac-107-explicit-utf8-header.ts | a source commit with an explicit `encoding UTF-8` (or `utf8`) header (§ 0, D20, D23): `resign-commits` `--apply` and dry run exit 1 with one stderr line naming the commit and its header, nothing on stdout, no bundle, no ref moved, no object written; a commit without the header whose message has the line `encoding UTF-8` is re-signed, exit 0, message bytes as they were; `replace --apply` and `add-file --apply` exit 0, the rewritten commit has no `encoding` header and its message bytes as they were; red on 032c397; mutation-tested |
 | AC-108 | ac-108-verify-before-move.ts | a `tree delta` FAILED, forced by a one-shot `git` PATH wrapper answering the first post-`commit-tree` `rev-parse ...^{tree}` with the empty tree's sha (§ 4.2, § 4.5, D24): `resign-commits --apply`, `apply --apply`, `tail --apply`, `replace --apply` and `add-file --apply` each exit 1 with exactly one stderr line naming `tree delta: FAILED`, stdout only the `backup:` line, the backup bundle kept, and every ref exactly as it was before the run; red on ef96e0d5; mutation-tested. Q2 follow-up (Scout MUST, D24): `apply --apply` and `tail --apply`, with a real second unrelated branch holding one unsigned commit, exit 1 with exactly one stderr line naming `signatures: FAILED`, same stdout/bundle/no-ref-moved shape (including the unrelated branch itself); red on ba201494, green and mutation-tested after the planned-ref-map fix. `resign-commits --apply`, with a policy naming a cert-only primary key whose only signing-capable key is a subkey (gpg signs with the subkey; `check` reports `wrong-key`), same shape; red on ef96e0d5, already green at ba201494 (a regression guard for D24's own resign-commits fix, not a new one) |
+| AC-109 | ac-109-scan-range-and-only.ts | `scan --range`/`--only` (§ 2.1, D25): a range excludes an old, unchanged blob and includes a new one; an annotated tag counts only when its own target commit is in the range; `--only=email` still finds an email hit and drops an ip hit in the same blob; a `--range`/`--only` side starting with `-`, an empty or unknown `--only` category (not trimmed — a leading space is unknown too), and `term` without `--terms` are usage errors (exit 2) before the repo is read; an unresolvable range is a refusal (exit 1); a syntactically valid range with no commits scans nothing, exit 0, with a stderr note naming it; red on cb49bd49 (v0.4.6) |

@@ -3,6 +3,26 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.7
+
+A pre-push check can now scan one slice of history instead of the whole
+thing, and for just the categories it cares about.
+
+- New: `git-leak-scan scan` gains `--range <range>`, scanning only the
+  commits and tags that `<range>` brings in, and — for a text file — only
+  the lines each of those commits itself adds (rename detection on, so a
+  pure rename adds nothing; a binary file keeps the whole-new-blob rule);
+  an old, unchanged line is never rescanned just because its file changed
+  elsewhere in the range. Hardened the same way `git-sign check`'s own
+  `<range>` already is: a leading `-` is a usage error before the repo is
+  read, an unresolvable revision is a refusal, and a valid range with no
+  commits scans nothing (exit 0) with a stderr note. (D25)
+- New: `git-leak-scan scan` gains `--only <a,b,...>`, a comma-separated
+  allowlist restricting which categories are reported and counted
+  (`email`, `url`, `local-path`, `hostname`, `ip`, `secret`, `term`). An
+  unknown or empty category, or `term` without `--terms`, is a usage
+  error. (D25)
+
 ## 0.4.6
 
 - Fix: `resign-commits --apply`, `apply --apply`, `tail --apply`,

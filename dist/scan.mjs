@@ -329,8 +329,77 @@ function isBinary(buf) {
 }
 
 // lib/scan.ts
+var CATEGORIES = ["email", "url", "local-path", "hostname", "ip", "secret", "term"];
 function shortSha(repo, env, rev) {
   return text(repo, ["rev-parse", "--short", rev], { env });
+}
+function refuseOptionLikeRange(range) {
+  if (range.split(/\.{2,3}/).some((side) => side.startsWith("-"))) {
+    throw new UsageError("--range '" + range + "': a revision must not start with '-'");
+  }
+}
+function resolveRangeCommits(repo, env, range) {
+  const r = run(repo, ["rev-list", "--reverse", "--end-of-options", range], { env });
+  if (r.status !== 0) throw new Refusal("invalid revision range '" + range + "'");
+  const out = r.stdout.replace(/\n$/, "");
+  return out ? out.split("\n") : [];
+}
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function parentsOf(repo, env, commit) {
+  const line = text(repo, ["rev-list", "--parents", "-n", "1", "--end-of-options", commit], { env });
+  return line.split(" ").filter(Boolean).slice(1);
+}
+function parseUnifiedDiff(raw) {
+  const textAdds = /* @__PURE__ */ new Map();
+  const binaryPaths = /* @__PURE__ */ new Set();
+  for (const section of raw ? raw.split(/^diff --git /m).slice(1) : []) {
+    const headerLine = section.slice(0, section.indexOf("\n"));
+    const m = /^a\/.* b\/(.*)$/.exec(headerLine);
+    if (!m) continue;
+    const newPath = m[1];
+    if (section.indexOf("\nBinary files ") !== -1) {
+      binaryPaths.add(newPath);
+      continue;
+    }
+    const added = [];
+    for (const line of section.split("\n")) {
+      if (line.startsWith("+++")) continue;
+      if (line.startsWith("+")) added.push(line.slice(1));
+    }
+    if (added.length > 0) textAdds.set(newPath, added.join("\n"));
+  }
+  return { textAdds, binaryPaths };
+}
+function parseCombinedDiff(raw, numParents) {
+  const textAdds = /* @__PURE__ */ new Map();
+  const binaryPaths = /* @__PURE__ */ new Set();
+  const allPlus = "+".repeat(numParents);
+  for (const section of raw ? raw.split(/^diff --(?:cc|combined) /m).slice(1) : []) {
+    const newPath = section.slice(0, section.indexOf("\n")).trim();
+    if (!newPath) continue;
+    if (section.indexOf("\nBinary files ") !== -1) {
+      binaryPaths.add(newPath);
+      continue;
+    }
+    const added = [];
+    for (const line of section.split("\n")) {
+      if (line.startsWith("+++") || line.startsWith("---")) continue;
+      if (line.slice(0, numParents) === allPlus) added.push(line.slice(numParents));
+    }
+    if (added.length > 0) textAdds.set(newPath, added.join("\n"));
+  }
+  return { textAdds, binaryPaths };
+}
+function rangeFileTargets(repo, env, commit) {
+  const parents = parentsOf(repo, env, commit);
+  const parsed = parents.length <= 1 ? parseUnifiedDiff(text(repo, ["diff", "-M", "--no-color", "--end-of-options", parents.length === 0 ? EMPTY_TREE : parents[0], commit], { env })) : parseCombinedDiff(text(repo, ["diff-tree", "-c", "-p", "--no-color", "--end-of-options", commit], { env }), parents.length);
+  const targets = [];
+  for (const [path3, text2] of parsed.textAdds) targets.push({ commit, path: path3, kind: "text", text: text2 });
+  for (const path3 of parsed.binaryPaths) {
+    const sha = text(repo, ["rev-parse", "--end-of-options", commit + ":" + path3], { env });
+    if (sha) targets.push({ commit, path: path3, kind: "blob", sha });
+  }
+  return targets;
 }
 function listTreeBlobs(repo, env, commit) {
   const out = text(repo, ["ls-tree", "-r", "--full-tree", commit], { env });
@@ -351,16 +420,23 @@ function identityText(repo, env, commit) {
   const out = text(repo, ["log", "-1", "--format=%an <%ae>%n%cn <%ce>", commit], { env });
   return out;
 }
-function collectTargets(repo, env) {
+function collectTargets(repo, env, range) {
   const targets = [];
-  const commits = text(repo, ["rev-list", "--all", "--reverse"], { env });
-  const commitList = commits ? commits.split("\n") : [];
+  const commitList = range ? range.commits : (() => {
+    const commits = text(repo, ["rev-list", "--all", "--reverse"], { env });
+    return commits ? commits.split("\n") : [];
+  })();
   for (const c of commitList) {
     const message = text(repo, ["log", "-1", "--format=%B", c], { env });
     targets.push({ commit: c, path: "(message)", kind: "text", text: message });
     targets.push({ commit: c, path: "(identity)", kind: "text", text: identityText(repo, env, c) });
-    for (const b of listTreeBlobs(repo, env, c)) targets.push({ commit: c, path: b.path, kind: "blob", sha: b.sha });
+    if (range) {
+      targets.push(...rangeFileTargets(repo, env, c));
+    } else {
+      for (const b of listTreeBlobs(repo, env, c)) targets.push({ commit: c, path: b.path, kind: "blob", sha: b.sha });
+    }
   }
+  const inRange = range ? new Set(range.commits) : null;
   const tagsRaw = text(
     repo,
     ["for-each-ref", "--format=%(refname)	%(objecttype)	%(*objectname)	%(objectname)", "refs/tags"],
@@ -369,18 +445,31 @@ function collectTargets(repo, env) {
   for (const l of tagsRaw ? tagsRaw.split("\n") : []) {
     const [ref, type, deref, obj] = l.split("	");
     if (type !== "tag") continue;
+    const target = deref || obj;
+    if (inRange && !inRange.has(target)) continue;
     const msg = text(repo, ["for-each-ref", "--format=%(contents)", ref], { env });
     const tagger = text(repo, ["for-each-ref", "--format=%(taggername) <%(taggeremail)>", ref], { env });
-    targets.push({ commit: deref || obj, path: "(tag-message)", kind: "text", text: msg });
-    targets.push({ commit: deref || obj, path: "(identity)", kind: "text", text: tagger });
+    targets.push({ commit: target, path: "(tag-message)", kind: "text", text: msg });
+    targets.push({ commit: target, path: "(identity)", kind: "text", text: tagger });
   }
   return targets;
 }
 function cmdScan(bin, args) {
-  const { positional, flags } = parseFlags(args, { valueFlags: ["--terms", "--allow"], boolFlags: [] });
+  const { positional, flags } = parseFlags(args, { valueFlags: ["--terms", "--allow", "--range", "--only"], boolFlags: [] });
   const repo = positional[0];
   if (!repo) throw new UsageError("missing <repo>");
   if (positional.length > 1) throw new UsageError("unexpected argument: " + positional[1]);
+  let only;
+  if (flags.only !== void 0) {
+    const items = flags.only.split(",");
+    for (const item of items) {
+      if (item === "") throw new UsageError("--only: empty category in '" + flags.only + "'");
+      if (!CATEGORIES.includes(item)) throw new UsageError("--only: unknown category '" + item + "' (known: " + CATEGORIES.join(", ") + ")");
+      if (item === "term" && flags.terms === void 0) throw new UsageError("--only: 'term' needs --terms");
+    }
+    only = new Set(items);
+  }
+  if (flags.range !== void 0) refuseOptionLikeRange(flags.range);
   requireRepo(repo);
   const env = process.env;
   let termsPath = null;
@@ -389,7 +478,19 @@ function cmdScan(bin, args) {
   if (flags.allow !== void 0) allowPath = resolveOutsideFile(repo, "--allow", flags.allow);
   const terms = termsPath ? parseLines(readUserFile("--terms", termsPath).toString("utf8"), true) : [];
   const allow = new Set(allowPath ? parseLines(readUserFile("--allow", allowPath).toString("utf8"), false) : []);
-  const targets = collectTargets(repo, env);
+  let targets;
+  if (flags.range !== void 0) {
+    const range = flags.range;
+    const rangeCommits = resolveRangeCommits(repo, env, range);
+    if (rangeCommits.length === 0) {
+      process.stderr.write("git-leak-scan: --range '" + range + "' brings in no commits; nothing scanned\n");
+      targets = [];
+    } else {
+      targets = collectTargets(repo, env, { commits: rangeCommits });
+    }
+  } else {
+    targets = collectTargets(repo, env);
+  }
   const seenPairs = /* @__PURE__ */ new Set();
   const agg = /* @__PURE__ */ new Map();
   const order = [];
@@ -414,6 +515,7 @@ function cmdScan(bin, args) {
       hits = scanBuiltins(t.text).concat(scanTerms(t.text, terms));
     }
     for (const h of hits) {
+      if (only && !only.has(h.category)) continue;
       const pairKey = h.category + "\0" + h.match + "\0" + t.commit + "\0" + t.path;
       if (seenPairs.has(pairKey)) continue;
       seenPairs.add(pairKey);
@@ -443,7 +545,7 @@ function cmdScan(bin, args) {
   process.exitCode = lines.length > 0 ? 1 : 0;
 }
 var SYNOPSES = {
-  scan: "git-leak-scan scan <repo> [--terms <file>] [--allow <file>]"
+  scan: "git-leak-scan scan <repo> [--terms <file>] [--allow <file>] [--range <range>] [--only <a,b,...>]"
 };
 main("git-leak-scan", (bin) => {
   const sub = process.argv[2];

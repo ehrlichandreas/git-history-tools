@@ -39,6 +39,7 @@ There are no other dependencies.
 
 ```sh
 sh bin/git-leak-scan scan ../my-repo --allow ~/my-public-identity.txt
+sh bin/git-leak-scan scan . --range v0.4.6..HEAD --only secret          # pre-push check: just this release's new commits, just secrets
 sh bin/git-release-squash tail ../my-repo --name=my-repo --tag=v1.0 --message="first release"          # dry run
 sh bin/git-release-squash tail ../my-repo --name=my-repo --tag=v1.0 --message="first release" --apply
 ```

@@ -1955,3 +1955,103 @@ refused), and `other` itself IS at its wrapper-moved value (that move
 happened via a separate git call, before and outside the transaction;
 the fix does not and cannot undo an external write the transaction never
 seemed as a part of itself) — confirmed red on 360babc5, green after.
+
+## D25: `git-leak-scan scan` gains `--range` and `--only` (v0.4.6, owner request 2026-10-25)
+
+The owner's own private token-scan script — run before every release push
+of nanojira and ght — was lost along with `/tmp/team-tmp`; the owner asked
+to replace it with `git-leak-scan` and to spare resources: a pre-push
+check on a PR-or-tag-sized range, not the whole history every time, and a
+way to focus a run on just the categories that matter for that check
+(`secret`, typically).
+
+`--range <range>`: narrows `scan`'s existing whole-history collection
+(`collectTargets`) to the commits `git rev-list <range>` lists (their
+message and identity lines, unchanged), and an annotated tag whose own
+target commit is in that commit list. For file content, the first cut of
+this decision scanned whole blobs new to the range (`git rev-list
+--objects <range>`'s own sha-set, membership-tested against each range
+commit's `ls-tree`) — correct for a wholly new file, but wrong for a file
+that merely CHANGED within the range: a changed file gets a new blob sha
+for its whole content, so an old, already-seen line sitting right next to
+a genuinely new one was reported again as if it were new (found by the
+owner dogfooding the v0.4.7 cut on ght's own history: two hits in
+`docs/DECISIONS.md` that were already present in the prior release).
+Fixed to scan at line granularity instead: per range commit, per text
+path it touches, only the lines that commit adds relative to its first
+parent (`git diff -M`, a plain unified diff) — the empty tree stands in
+for a root commit's missing parent, so its whole content counts as added,
+same as before. A merge commit instead reads `git diff-tree -c -p` (git's
+combined diff): a line counts as added only when it is new against EVERY
+parent at once (all of its per-parent leading marker characters are `+`);
+a line matching even one parent is not new. `-M` rename detection is on
+in both forms, so a pure rename (same content, different path) produces
+no `+` line at all for that path and adds nothing — exactly the outcome
+§ 2.1's "old, unchanged content is never rescanned" promise requires of a
+move, not just an edit. A binary path cannot be meaningfully line-diffed,
+so it keeps the original whole-blob rule: its content at the range commit
+that changes it (`git rev-parse <commit>:<path>`) is read and scanned
+once in full, same cost and behaviour as the first cut had for every
+file. This is strictly per-commit, per-path work now, not a single
+`rev-list --objects` sha-set the way the first cut had it — one `git
+diff`/`diff-tree` call per range commit instead of one `rev-list
+--objects` for the whole range — but range sizes are pre-push-sized by
+construction (a PR or a release's worth of commits), so this was not a
+concern raised against it.
+
+Hardening is the exact same shape `git-sign check`'s own `<range>`
+already has (D20): a leading `-` anywhere in `<range>` or either side of
+`..`/`...` is a usage error (exit 2) before the repo is even read (git
+would otherwise read it as an option — `scan --range=--output=<file>`
+would make `rev-list` WRITE `<file>`); every `rev-list` call reads
+`<range>` only after `--end-of-options` as the second line of defence;
+an unresolvable revision is a refusal (exit 1, nothing scanned), not an
+uncaught crash. New here, not in `check`'s own range (not asked for
+there): a syntactically valid range that resolves to zero commits scans
+nothing and exits 0 — silently finding nothing would read exactly like
+"found nothing to report" from a real scan, so one stderr line names the
+empty range, the same way a usage error or a refusal always explains
+itself on stderr.
+
+`--only <a,b,...>`: a comma-separated allowlist of categories (the
+existing closed set `scanBuiltins`/`scanTerms` can produce: `email`,
+`url`, `local-path`, `hostname`, `ip`, `secret`, `term`) — a hit outside
+it is dropped before aggregation, so it is neither reported nor counted,
+not merely hidden from the printed lines. List items are not trimmed
+(matching `--exclude-tag`'s own no-trim rule in the sibling nanojira
+project, for the same reason: a bad value should fail loudly, not be
+silently forgiven): a leading or trailing space makes an otherwise-known
+category name unknown. An empty item (the whole list empty, or one
+either side of a leading, trailing or doubled comma), an unknown
+category, or `term` without `--terms` (a category with nothing to ever
+produce a hit for it is as much a usage mistake as a typo) are each a
+usage error (exit 2), checked before the repo is read, same as `--range`.
+
+Neither flag changes `scan`'s output line format, exit codes 0/1 for a
+clean/dirty scan, `--allow`'s own suppression, `--terms`'s own category,
+or § 4.4's outside-repo rule for `--terms`/`--allow` — both are purely
+narrowing filters over the same collection-and-aggregation pipeline.
+No new dependency.
+
+Tests: `test/ac/ac-109-scan-range-and-only.ts` (39 checks) — a range
+excludes an old unchanged blob and includes a new one (A); a changed file
+that keeps an old secret line and gains a new clean one gives no hit for
+the old line (A2, the owner's dogfood-found bug, red against the first cut's
+whole-blob approach); the same file gaining a genuinely new secret line
+gives a hit (A3); a file renamed with no content change, holding a
+secret, gives no hit (A4, rename detection); an annotated tag counts only
+with its target in range (B); `--only=email` keeps an email hit and drops
+an ip hit from the same blob (C); the usage-error legs for a dash-leading
+range (both sides of `..`), an empty/unknown/untrimmed `--only` category
+and `term` without `--terms` (D) — each of D's six legs additionally pins
+the exact stderr message, not just the exit code, since exit 2 alone does
+not distinguish the new refusal from v0.4.6's own "unknown flag" refusal
+for the same arguments (Reviewer SHOULD); an unresolvable range is a
+refusal, not a usage error (E); an empty range scans nothing with the
+stderr note (F). Red on cb49bd49 (v0.4.6, 15 of 39 checks failing: A/B/C/E/F
+in full, plus every one of D's six message pins — D's exit-2-only legs
+alone would have stayed green on v0.4.6 too, since an unknown flag is also
+exit 2 there); A2 alone is also red against the first (whole-blob) cut of
+this same decision, A3/A4 stay green there since a whole-new-blob and a
+content-unchanged-blob both already gave the right answer at that
+granularity.
