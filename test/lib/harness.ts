@@ -40,6 +40,16 @@ export function freshDir(label?: string): string {
   return dir;
 }
 
+/* No test reads the machine's own configuration (AC-66): neither git's
+ * global and system config nor git-sign's default policy, which falls back
+ * to $XDG_CONFIG_HOME, else $HOME/.config -- where a real owner policy may
+ * live, silently used by any test that forgets --policy=. Set on
+ * process.env itself, so every child inherits it: runBin, the git helpers
+ * below and a test's own bare spawnSync alike. HOME stays as it is. */
+process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.XDG_CONFIG_HOME = freshDir('xdg-config');
+
 export function binPath(name: string): string { return path.join(BIN_DIR, name); }
 
 /**

@@ -3,6 +3,28 @@
 User-facing changes per release. The contract is `docs/SPECIFICATION.md`;
 renames and breaking changes are in `docs/MIGRATION.md`.
 
+## 0.4.2
+
+No change to the four tools: `git-release-squash`, `git-leak-scan`,
+`git-history-rewrite` and `git-sign` behave exactly as in 0.4.1. This
+release changes only the test suite, which runs from a clone
+(`npm test` / `node test/run-all.ts`):
+
+- The suite runs its files in a pool: `--jobs=<n>` or `GHT_TEST_JOBS`,
+  default min(cores, 8); `--jobs=1` is the old serial run. Each file's
+  output is printed in file order, so a pooled run reads like a serial
+  one. Files marked `@serial` run alone after the pool, and `@slow` files
+  start first.
+- All node processes of a run share one compile cache, removed at the
+  end, so `lib/` and the harness are not compiled again for every tool
+  call.
+- `GHT_TEST_TIMES=<file>` writes each test file's wall time as TSV.
+- Every test is isolated from the machine's git config and git-sign
+  policy (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, an
+  empty `XDG_CONFIG_HOME`). A key no fixture sets itself, such as a
+  global `gpg.format=ssh` or `core.hooksPath`, or the owner's own
+  git-sign policy, can no longer change a result; AC-66 checks this.
+
 ## 0.4.1
 
 - Fix: no temporary directory is left behind when writing a temporary

@@ -44,7 +44,9 @@ Usage details are in [SKILL.md](SKILL.md) and the full contract is in
 is in [docs/CHANGES.md](docs/CHANGES.md). Run the tests with
 `node test/run-all.ts`. Their fixtures go under `/tmp`, or under
 `GHT_TEST_ROOT=<dir>` if set; `GHT_KEEP=1` keeps them, and the run's own
-root directory, for inspection.
+root directory, for inspection. Files run in parallel, `--jobs=<n>` (or
+`GHT_TEST_JOBS`) at a time, default up to 8; `--jobs=1` runs them one by
+one, and `GHT_TEST_TIMES=<file>` writes each file's time there.
 
 **v0.2.0** renamed the `ght-squash`/`ght-scan`/`ght-rewrite` commands to
 `release-squash`/`leak-scan`/`history-rewrite`, and **v0.3.0** prefixed them

@@ -65,7 +65,10 @@ pushes.
 - Node.js ≥ 18 with no dependencies. The layout is `SKILL.md`, `bin/`
   (sh wrappers) and `lib/`.
 - Tests build fixture repos under `/tmp` with a throwaway GNUPGHOME and a
-  generated key. The user's keyring is never touched by tests.
+  generated key. The user's keyring is never touched by tests, nor are the
+  user's git config and git-sign policy: the harness sets
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and an empty
+  `XDG_CONFIG_HOME` of its own (AC-66).
 - Not in scope:
   - merge histories;
   - rewriting messages;
@@ -1093,3 +1096,57 @@ correct) shows no effect, as expected. Disabling either refusal condition
 reproduces silent resigning of the ambiguous-ending tag instead of a
 refusal. Each turns red on its mutation and green on the fix, run back to
 back against the same fixtures.
+
+## D19: the test runner runs files in parallel, times them, and gives the run one compile cache (test speed, after v0.4.1)
+
+The full run took as long as nanojira's whole suite: 266.1 s serial for
+65 files (v0.4.1, measured with the new `GHT_TEST_TIMES`). `test/run-all.ts`
+was a strictly serial loop. Key generation, gpg-agent starts and the
+bundle/npm files were measured and are minor; the cost is process starts,
+above all of the tools themselves.
+
+**Pool.** Files run `--jobs=<n>` (or `GHT_TEST_JOBS`) at a time, default
+`min(os.availableParallelism(), 8)` -- a port of nanojira's runner
+(its DECISIONS 199/201). Each file's report is buffered and printed in
+file order, so the output of a pooled run reads like a serial one, with
+the same summary and exit code. `--jobs=1` is the old serial loop. The
+async spawn keeps `spawnSync`'s contract (120 s timeout, SIGTERM and a
+null status, the 1 MiB output limit the serial loop always had), so a
+file's verdict cannot depend on the mode. A header marker `@serial` runs
+a file alone after the pool; `@slow` dispatches it first. Every fixture
+is a `freshDir()` under the shared run root and nothing writes git's
+global or system config, so files do not see each other.
+
+**`GHT_TEST_TIMES=<file>`** writes each file's wall time there (TSV:
+file, phase, start_ms, ms, slowest first, then a `total` row), same
+format as nanojira's `NJ_TEST_TIMES`. stdout does not change.
+
+**One `NODE_COMPILE_CACHE` per run.** Every `bin/*` call is `node
+lib/<tool>.ts`, and a full run makes 290 of them (counted with a wrapping
+`GHT_BIN_DIR`): without a cache each one type-strips and compiles `lib/`
+again (`bin/git-sign --help`: median 253 ms without, 84.5 ms with, in a
+probe under load). The cache is a `ght-node-cache-*` mkdtemp next to the
+run root under `GHT_TEST_ROOT` (else `/tmp`): not inside the run root,
+because it is no leak, and never in `os.tmpdir()`, which may be on disk.
+It is removed at the end, `GHT_KEEP` or not. Testing `dist/` instead
+would be faster still, but changes what is under test.
+
+**Proof is external.** No AC file covers the runner itself (`test/ac`
+holds only § 6's rows), the same as for the run-root leak sweep. The
+proof, on v0.4.1's 65 files:
+- Check logs (every `T.check`, per file, including the six files ac-40
+  runs as its own children): 1103 checks, ok/FAIL identical between the
+  old serial loop, `--jobs=1` and `--jobs=8`; the only textual
+  differences are the shas of freshly signed fixture commits, which
+  differ on every run.
+- Three product mutants (a forbidden-window boundary, the backup bundle
+  without `--all`, leak-scan without its email category) fail the same
+  9, 18 and 12 checks under the old serial loop and the new pool.
+- 11 pooled rounds (`--jobs=8`), all 65/65 and nothing left in the run
+  root: 43.7–51.0 s, against 266.1 s serial before (73.8 s pooled
+  without the compile cache).
+- Timeout margin over those rounds (each `spawnSync` of a test file
+  timed in ten of them), every limit at most 25 % used: the
+  slowest file took 29.8 s of its 120 s, the slowest `bin/*` call 5.0 s
+  of 30 s, ac-40's slowest child 9.0 s of 60 s, key generation 0.3 s of
+  30 s and `--list-secret-keys` 0.2 s of 15 s.
