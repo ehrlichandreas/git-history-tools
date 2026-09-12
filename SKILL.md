@@ -3,7 +3,7 @@ name: git-history-tools
 description: "Three tools for preparing a git history for publication: release-squash folds commits into one per tag, leak-scan searches every reachable blob/message/identity for emails/URLs/paths/hostnames/IPs/secrets/custom terms, history-rewrite applies literal text replacements or adds a file into every commit. All three keep commits signed and never push. Use when a repository's history needs to be squashed to tagged releases, checked for leaked information before going public, or rewritten to remove sensitive strings."
 license: MIT
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # git-history-tools
@@ -13,15 +13,15 @@ signed, and none of them pushes.
 
 ## Usage
 
-`sh <skill>/bin/ght-squash <subcommand> [args...]`, `sh <skill>/bin/ght-scan
-<subcommand> [args...]`, `sh <skill>/bin/ght-rewrite <subcommand> [args...]`
-(relative to this skill's own folder). Needs only Node.js >= 18, no other
+`sh <skill>/bin/release-squash <subcommand> [args...]`, `sh <skill>/bin/leak-scan
+<subcommand> [args...]`, `sh <skill>/bin/history-rewrite <subcommand> [args...]`
+(relative to this skill's own folder). Needs only Node.js >= 24, no other
 dependency.
 
 Every writing subcommand is a dry run unless `--apply` is given: it prints the
 same report it would with `--apply`, changes no ref, creates no bundle.
 
-### release-squash (`bin/ght-squash`)
+### release-squash (`bin/release-squash`)
 
 - `plan <repo> [--name=<name>]` -- read-only. Prints, per tag reachable from
   HEAD, how many commits fold into it and a tree-equality check.
@@ -39,7 +39,7 @@ same report it would with `--apply`, changes no ref, creates no bundle.
   carry the real tagger date and defeat the anonymisation. Refuses if `<tag>`
   already exists.
 
-### leak-scan (`bin/ght-scan`)
+### leak-scan (`bin/leak-scan`)
 
 - `scan <repo> [--terms <file>] [--allow <file>]` -- searches every reachable
   blob, commit/tag message, and author/committer/tagger identity line for
@@ -47,7 +47,7 @@ same report it would with `--apply`, changes no ref, creates no bundle.
   (with `--terms`) the user's own case-insensitive terms. `--allow` suppresses
   known-good exact matches. Exit 0 clean, 1 on hits, 2 on a usage error.
 
-### history-rewrite (`bin/ght-rewrite`)
+### history-rewrite (`bin/history-rewrite`)
 
 - `replace <repo> --rules <file> [--hook <script>] [--apply]` -- applies
   ordered `from<TAB>to` literal replacements to every text blob in every
@@ -61,14 +61,14 @@ same report it would with `--apply`, changes no ref, creates no bundle.
 
 To prepare and cut a release:
 
-1. `ght-scan scan <repo> [--allow <file>]` -- check the history is clean
-   before doing anything else. Fix any real hit with `ght-rewrite replace`/
+1. `leak-scan scan <repo> [--allow <file>]` -- check the history is clean
+   before doing anything else. Fix any real hit with `history-rewrite replace`/
    `add-file --apply`, or add a known-good match to the allowlist.
-2. `ght-squash tail <repo> --tag=<tag> --message=<text> --apply` -- finish
+2. `release-squash tail <repo> --tag=<tag> --message=<text> --apply` -- finish
    the release: one new anonymous, signed commit and tag in one step (or
-   `ght-squash apply` instead, if every commit up to HEAD is already tagged
+   `release-squash apply` instead, if every commit up to HEAD is already tagged
    and only needs folding down).
-3. Re-run `ght-scan scan` on the result, and check the tool's own `verify:`
+3. Re-run `leak-scan scan` on the result, and check the tool's own `verify:`
    lines (tree delta, signatures, and for a squash, every commit tagged) --
    all three tools print these after every `--apply`.
 4. Push manually. None of these tools pushes anything, ever.

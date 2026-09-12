@@ -1,14 +1,23 @@
 {
   "name": "git-history-tools",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Three tools for preparing a git history for publication: release-squash, leak-scan, history-rewrite.",
+  "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "bin": {
-    "ght-squash": "bin/ght-squash",
-    "ght-scan": "bin/ght-scan",
-    "ght-rewrite": "bin/ght-rewrite"
+    "release-squash": "bin/release-squash",
+    "leak-scan": "bin/leak-scan",
+    "history-rewrite": "bin/history-rewrite"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node test/run-all.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
   }
 }

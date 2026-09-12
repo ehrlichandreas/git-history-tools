@@ -1,4 +1,4 @@
-# Specification — git-history-tools v0.1
+# Specification — git-history-tools v0.2
 
 This is the precise CLI contract. docs/DECISIONS.md D1 is the scope and shape;
 this document pins the exact arguments, output lines, exit codes and refusals
@@ -8,13 +8,13 @@ implementation that disagrees is wrong, not the test.
 
 ## 0. Conventions
 
-- Layout: `SKILL.md`, `bin/ght-squash`, `bin/ght-scan`, `bin/ght-rewrite`
-  (POSIX `sh` wrappers, `exec node "$(dirname "$0")/../lib/<name>.js" "$@"`),
-  `lib/*.js`. Node.js ≥ 18, no runtime dependencies (D1).
+- Layout: `SKILL.md`, `bin/release-squash`, `bin/leak-scan`, `bin/history-rewrite`
+  (POSIX `sh` wrappers, `exec node "$(dirname "$0")/../lib/<name>.ts" "$@"`),
+  `lib/*.ts`. Node.js ≥ 24, no runtime dependencies (D1).
 - Every tool is invoked as `<bin> <subcommand> [args...]`. An unknown
   subcommand, a missing required argument, or an unknown flag is a **usage
   error**: exit 2, one line on stderr, `<bin-basename>: <reason>` (e.g.
-  `ght-squash: unknown subcommand 'plna'`), nothing on stdout.
+  `release-squash: unknown subcommand 'plna'`), nothing on stdout.
 - A **refusal** (a precondition the repo itself fails, not a CLI mistake) is
   exit 1, one line on stderr in the same `<bin-basename>: <reason>` form,
   nothing on stdout, and the repo is left byte-for-byte unchanged — no ref
@@ -63,7 +63,7 @@ implementation that disagrees is wrong, not the test.
   order. `leak-scan scan` has no such restriction (reading history never
   needs a linear one).
 
-## 1. release-squash (`bin/ght-squash`)
+## 1. release-squash (`bin/release-squash`)
 
 ### 1.1 `plan <repo> [--name=<name>]`
 
@@ -118,20 +118,20 @@ commit(s) from the start of history are not covered by plan`).
 
 Refuses if HEAD is not itself on a tag (every commit through HEAD must
 already belong to some tag; an untagged tail is what `tail` is for):
-`ght-squash: HEAD is not tagged -- run 'tail' first`. Refuses on a merge
+`release-squash: HEAD is not tagged -- run 'tail' first`. Refuses on a merge
 commit, and (only when `--apply` is given — the writing form) on a dirty
-working tree: `ght-squash: working tree is dirty`. A dry run (no
+working tree: `release-squash: working tree is dirty`. A dry run (no
 `--apply`) tolerates a dirty tree, exactly like `plan`.
 
 Without `--apply`: prints the same two-line-per-tag report `plan` prints
-(identical format), then one line `ght-squash: dry run, no ref changed
+(identical format), then one line `release-squash: dry run, no ref changed
 (use --apply to write)`, exits 0, writes nothing — no map file either,
 even though `--map` was given (a dry run never writes *any* file).
 
 With `--apply`:
 1. Creates the backup bundle (§ 4.1) before changing anything.
 2. Rewrites `refs/heads/<branch>` (whichever branch HEAD is on; a detached
-   HEAD is a refusal, `ght-squash: HEAD is detached`) so that history
+   HEAD is a refusal, `release-squash: HEAD is detached`) so that history
    becomes exactly one commit per tag, oldest first, each parented on the
    previous squash commit (the first has no parent). Each new commit's
    tree is the original tag commit's own tree, byte-identical. Subject is
@@ -156,7 +156,7 @@ Squashes only the commits reachable from HEAD that are not reachable from
 any tag (the untagged tail) into exactly one new commit, parented on the
 last tag's commit (or parentless, if there are no tags at all). Refuses if
 there is no untagged tail (HEAD is itself already tagged):
-`ght-squash: HEAD is already tagged, nothing to squash`. Refuses on a merge
+`release-squash: HEAD is already tagged, nothing to squash`. Refuses on a merge
 commit and, when `--apply` is given, on a dirty tree (same as `apply`).
 Unlike `apply`, `tail` does **not** require any existing tag (a brand-new
 repo with zero tags and an untagged HEAD squashes its whole history into
@@ -165,7 +165,7 @@ is a separate, manual step outside this tool's scope (D1 only names
 `plan`/`apply`/`tail`, no `tag` subcommand).
 
 Without `--apply`: prints `tail: squashes <N> commit(s) (<oldest-short>..
-<head-short>) into "<subject>"` then `ght-squash: dry run, no ref changed
+<head-short>) into "<subject>"` then `release-squash: dry run, no ref changed
 (use --apply to write)`, exits 0, writes nothing.
 
 With `--apply`: creates the backup bundle, rewrites the branch HEAD is on
@@ -204,12 +204,12 @@ defeating the anonymisation `--dates=anon` exists for):
   creation time + 60s via `--faked-system-time`), regardless of `--dates`.
 - Refuses, before writing anything (dry run or `--apply` alike, same as
   the "HEAD is not tagged"/"already tagged" preconditions elsewhere), if
-  `<tag>` already exists: `ght-squash: tag <tag> already exists`.
+  `<tag>` already exists: `release-squash: tag <tag> already exists`.
 - Without `--apply`, the usual dry-run report and line are printed and
   nothing is written, same as the untagged form; the planned tag name and
   title appear in the report line in place of `(untagged)`.
 
-## 2. leak-scan (`bin/ght-scan`)
+## 2. leak-scan (`bin/leak-scan`)
 
 ### 2.1 `scan <repo> [--terms <file>] [--allow <file>]`
 
@@ -270,7 +270,7 @@ usage error (bad flag, `--terms`/`--allow` file does not exist). Refuses
 path inside `<repo>` (§ 4.4) — printed before any hit, as the sole output
 line.
 
-## 3. history-rewrite (`bin/ght-rewrite`)
+## 3. history-rewrite (`bin/history-rewrite`)
 
 ### 3.1 `replace <repo> --rules <file> [--hook <script>] [--apply]`
 
@@ -292,7 +292,7 @@ and reapplied after all rules run).
 
 Refuses (before writing anything) if applying every rule, in order, to any
 commit's message, or to any annotated tag's message, would change that
-message's text: `ght-rewrite: commit <short-sha> message would change --
+message's text: `history-rewrite: commit <short-sha> message would change --
 replace only rewrites file contents` (or `tag <tag>` for a tag message).
 This is checked for every commit/tag up front, before any blob is
 rewritten, so the refusal is exit 1 with the repo fully unchanged, not a
@@ -310,7 +310,7 @@ naming the hook and its exit status/output, repo left unchanged.
 
 Without `--apply`: prints one line per commit that would change,
 `replace: <short-sha> would change`, then a summary line `replace: N of M
-commits would change`, then `ght-rewrite: dry run, no ref changed (use
+commits would change`, then `history-rewrite: dry run, no ref changed (use
 --apply to write)`; exits 0; writes nothing (including: the hook, if
 given, is still invoked during the dry run's tree computation, since
 knowing which commits "would change" requires computing the would-be
@@ -421,51 +421,51 @@ is rewritten, which is exactly the leak this whole tool exists to prevent.
 
 ## 5. Acceptance criteria
 
-One test file per criterion, `test/ac/ac-NN-<slug>.js`, run via
-`node test/run-all.js` (defaults to `bin/` next to `test/`; an explicit
+One test file per criterion, `test/ac/ac-NN-<slug>.ts`, run via
+`node test/run-all.ts` (defaults to `bin/` next to `test/`; an explicit
 path may be given as `argv[2]`). Every file reports `CANNOT RUN` (not a
 failure) if the binary it needs does not exist yet — the oracle is
 written before the implementation.
 
 | AC | File | Covers |
 |----|------|--------|
-| AC-01 | ac-01-squash-plan-basic.js | `plan`: per-tag lines, tree-equality OK, a tag on the root commit |
-| AC-02 | ac-02-squash-plan-two-tags-one-commit.js | `plan`: two tags on one commit, both printed; `apply --apply`: both tags re-point to the SAME new squash commit |
-| AC-03 | ac-03-squash-plan-tag-types.js | `plan`: lightweight and annotated tags both handled, consistent line shape |
-| AC-04 | ac-04-squash-plan-untagged-tail.js | `plan`: untagged tail reported, not folded |
-| AC-05 | ac-05-squash-refuses-merge.js | `plan`/`apply`/`tail` all refuse a merge commit |
-| AC-06 | ac-06-squash-apply-refuses-dirty.js | `apply --apply` refuses a dirty tree; dry run does not |
-| AC-07 | ac-07-squash-apply-refuses-untagged-head.js | `apply` refuses when HEAD is not tagged |
-| AC-08 | ac-08-squash-apply-dry-run-no-refs-changed.js | `apply` without `--apply` changes no ref |
-| AC-09 | ac-09-squash-apply-creates-backup-bundle.js | `apply --apply` creates the named, verifiable bundle first |
-| AC-10 | ac-10-squash-apply-map-file.js | `apply --apply`'s map file: one `<old-sha> <tag>` line per original commit |
-| AC-11 | ac-11-squash-apply-anon-dates.js | `--dates=anon`: exactly 1970-01-(i+1) 12:00:00 +0000, i 1-based |
-| AC-12 | ac-12-squash-apply-keep-dates.js | `--dates=keep`: original dates preserved byte-for-byte |
-| AC-13 | ac-13-squash-apply-verification-signatures.js | post-rewrite signature verification passes for every commit/tag |
-| AC-14 | ac-14-squash-apply-verification-every-commit-tagged.js | post-rewrite "every commit tagged" check |
-| AC-15 | ac-15-squash-tail-basic.js | `tail`: squashes only the untagged tail into one commit |
-| AC-16 | ac-16-squash-tail-refuses-no-tail.js | `tail` refuses when HEAD is already tagged |
-| AC-17 | ac-17-squash-tail-no-tags-yet.js | `tail` on a repo with zero tags squashes everything, no refusal |
-| AC-18 | ac-18-scan-basic-categories.js | `scan`: email/URL/local-path/hostname/IP/secret hits, one line per hit, exit 0/1 |
-| AC-19 | ac-19-scan-hit-in-tag-message.js | `scan`: a hit only inside an annotated tag's own message |
-| AC-20 | ac-20-scan-hit-in-author-email.js | `scan`: a hit only inside a commit author's identity line |
-| AC-21 | ac-21-scan-terms-file.js | `scan --terms`: custom case-insensitive terms |
-| AC-22 | ac-22-scan-allowlist.js | `scan --allow`: suppresses an exact known-good match |
-| AC-23 | ac-23-scan-usage-errors.js | `scan`: bad flag / missing file is exit 2, not 1 |
-| AC-24 | ac-24-rewrite-replace-order-matters.js | `replace`: rules apply in file order, each on the previous rule's output |
-| AC-25 | ac-25-rewrite-replace-binary-untouched.js | `replace`: a binary blob is byte-identical after rewrite |
-| AC-26 | ac-26-rewrite-replace-no-trailing-newline.js | `replace`: a file with no trailing newline keeps none |
-| AC-27 | ac-27-rewrite-replace-refuses-message-change.js | `replace`: refuses when a commit message would change |
-| AC-28 | ac-28-rewrite-replace-refuses-tag-message-change.js | `replace`: refuses when a tag message would change |
-| AC-29 | ac-29-rewrite-refuses-rules-inside-repo.js | `replace`/`scan`: refuses a `--rules`/`--terms`/`--allow` path inside `<repo>` |
-| AC-30 | ac-30-rewrite-add-file-existing.js | `add-file`: replaces an existing blob at the target path in some commits |
-| AC-31 | ac-31-rewrite-dry-run-no-refs-changed.js | `replace`/`add-file` without `--apply` changes no ref |
-| AC-32 | ac-32-rewrite-apply-creates-backup-bundle.js | `replace --apply` creates the backup bundle |
-| AC-33 | ac-33-rewrite-verification-rule-sources-clean.js | post-rewrite "rule sources clean" leak-scan check |
-| AC-34 | ac-34-rewrite-replace-hook.js | `--hook`: receives the tree sha, its printed sha overrides the tree |
-| AC-35 | ac-35-squash-tail-continues-dates.js | `apply` then `tail` later equals one `apply`/`tail` run: same tree, dates and subjects, commit by commit |
-| AC-36 | ac-36-squash-tail-tag-release.js | `tail --tag --message`: subject/tag/tagger-date/signature, usage errors, refuses an existing tag |
-| AC-37 | ac-37-squash-tail-tag-vs-apply-equivalence.js | one `apply` over pre-tagged releases equals `tail --tag` run release by release: same subjects and dates per commit |
-| AC-38 | ac-38-squash-dry-run-writes-no-objects.js | `plan`/`apply`/`tail` dry runs leave `.git/objects` byte-identical |
-| AC-39 | ac-39-rewrite-dry-run-writes-no-objects.js | `replace`/`add-file` dry runs leave `.git/objects` byte-identical |
-| AC-40 | ac-40-harness-cleanup-leaves-tmp-root-empty.js | harness hygiene: backup bundles are cleaned up too; a run leaves 0 entries in a fresh tmp root |
+| AC-01 | ac-01-squash-plan-basic.ts | `plan`: per-tag lines, tree-equality OK, a tag on the root commit |
+| AC-02 | ac-02-squash-plan-two-tags-one-commit.ts | `plan`: two tags on one commit, both printed; `apply --apply`: both tags re-point to the SAME new squash commit |
+| AC-03 | ac-03-squash-plan-tag-types.ts | `plan`: lightweight and annotated tags both handled, consistent line shape |
+| AC-04 | ac-04-squash-plan-untagged-tail.ts | `plan`: untagged tail reported, not folded |
+| AC-05 | ac-05-squash-refuses-merge.ts | `plan`/`apply`/`tail` all refuse a merge commit |
+| AC-06 | ac-06-squash-apply-refuses-dirty.ts | `apply --apply` refuses a dirty tree; dry run does not |
+| AC-07 | ac-07-squash-apply-refuses-untagged-head.ts | `apply` refuses when HEAD is not tagged |
+| AC-08 | ac-08-squash-apply-dry-run-no-refs-changed.ts | `apply` without `--apply` changes no ref |
+| AC-09 | ac-09-squash-apply-creates-backup-bundle.ts | `apply --apply` creates the named, verifiable bundle first |
+| AC-10 | ac-10-squash-apply-map-file.ts | `apply --apply`'s map file: one `<old-sha> <tag>` line per original commit |
+| AC-11 | ac-11-squash-apply-anon-dates.ts | `--dates=anon`: exactly 1970-01-(i+1) 12:00:00 +0000, i 1-based |
+| AC-12 | ac-12-squash-apply-keep-dates.ts | `--dates=keep`: original dates preserved byte-for-byte |
+| AC-13 | ac-13-squash-apply-verification-signatures.ts | post-rewrite signature verification passes for every commit/tag |
+| AC-14 | ac-14-squash-apply-verification-every-commit-tagged.ts | post-rewrite "every commit tagged" check |
+| AC-15 | ac-15-squash-tail-basic.ts | `tail`: squashes only the untagged tail into one commit |
+| AC-16 | ac-16-squash-tail-refuses-no-tail.ts | `tail` refuses when HEAD is already tagged |
+| AC-17 | ac-17-squash-tail-no-tags-yet.ts | `tail` on a repo with zero tags squashes everything, no refusal |
+| AC-18 | ac-18-scan-basic-categories.ts | `scan`: email/URL/local-path/hostname/IP/secret hits, one line per hit, exit 0/1 |
+| AC-19 | ac-19-scan-hit-in-tag-message.ts | `scan`: a hit only inside an annotated tag's own message |
+| AC-20 | ac-20-scan-hit-in-author-email.ts | `scan`: a hit only inside a commit author's identity line |
+| AC-21 | ac-21-scan-terms-file.ts | `scan --terms`: custom case-insensitive terms |
+| AC-22 | ac-22-scan-allowlist.ts | `scan --allow`: suppresses an exact known-good match |
+| AC-23 | ac-23-scan-usage-errors.ts | `scan`: bad flag / missing file is exit 2, not 1 |
+| AC-24 | ac-24-rewrite-replace-order-matters.ts | `replace`: rules apply in file order, each on the previous rule's output |
+| AC-25 | ac-25-rewrite-replace-binary-untouched.ts | `replace`: a binary blob is byte-identical after rewrite |
+| AC-26 | ac-26-rewrite-replace-no-trailing-newline.ts | `replace`: a file with no trailing newline keeps none |
+| AC-27 | ac-27-rewrite-replace-refuses-message-change.ts | `replace`: refuses when a commit message would change |
+| AC-28 | ac-28-rewrite-replace-refuses-tag-message-change.ts | `replace`: refuses when a tag message would change |
+| AC-29 | ac-29-rewrite-refuses-rules-inside-repo.ts | `replace`/`scan`: refuses a `--rules`/`--terms`/`--allow` path inside `<repo>` |
+| AC-30 | ac-30-rewrite-add-file-existing.ts | `add-file`: replaces an existing blob at the target path in some commits |
+| AC-31 | ac-31-rewrite-dry-run-no-refs-changed.ts | `replace`/`add-file` without `--apply` changes no ref |
+| AC-32 | ac-32-rewrite-apply-creates-backup-bundle.ts | `replace --apply` creates the backup bundle |
+| AC-33 | ac-33-rewrite-verification-rule-sources-clean.ts | post-rewrite "rule sources clean" leak-scan check |
+| AC-34 | ac-34-rewrite-replace-hook.ts | `--hook`: receives the tree sha, its printed sha overrides the tree |
+| AC-35 | ac-35-squash-tail-continues-dates.ts | `apply` then `tail` later equals one `apply`/`tail` run: same tree, dates and subjects, commit by commit |
+| AC-36 | ac-36-squash-tail-tag-release.ts | `tail --tag --message`: subject/tag/tagger-date/signature, usage errors, refuses an existing tag |
+| AC-37 | ac-37-squash-tail-tag-vs-apply-equivalence.ts | one `apply` over pre-tagged releases equals `tail --tag` run release by release: same subjects and dates per commit |
+| AC-38 | ac-38-squash-dry-run-writes-no-objects.ts | `plan`/`apply`/`tail` dry runs leave `.git/objects` byte-identical |
+| AC-39 | ac-39-rewrite-dry-run-writes-no-objects.ts | `replace`/`add-file` dry runs leave `.git/objects` byte-identical |
+| AC-40 | ac-40-harness-cleanup-leaves-tmp-root-empty.ts | harness hygiene: backup bundles are cleaned up too; a run leaves 0 entries in a fresh tmp root |
