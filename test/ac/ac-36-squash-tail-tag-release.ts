@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 function identDate(repo: string, gpg: H.Gpg, rev: string, field: string): string | null {
   const raw = H.catFile(repo, gpg, rev, '-p');
@@ -42,20 +42,20 @@ function taggerDate(repo: string, gpg: H.Gpg, tag: string): string | null {
     const repo = H.initRepo('ac36-usage', gpg);
     H.commit(repo, gpg, 'root', { 'a.txt': 'one\n' });
 
-    const noMsg = H.runBin('release-squash', ['tail', repo, '--tag=v1'], { gnupgHome: gpg.gnupgHome });
+    const noMsg = H.runBin('git-release-squash', ['tail', repo, '--tag=v1'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36: --tag without --message/--message-file is a usage error, exit 2', noMsg, 2);
 
     const msgFile = path.join(H.freshDir("ac36-msg"), "ac36-msg.txt");
     fs.writeFileSync(msgFile, 'release one\n');
-    const both = H.runBin('release-squash',
+    const both = H.runBin('git-release-squash',
       ['tail', repo, '--tag=v1', '--message=release one', '--message-file=' + msgFile],
       { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36: --message AND --message-file together is a usage error, exit 2', both, 2);
 
-    const msgNoTag = H.runBin('release-squash', ['tail', repo, '--message=release one'], { gnupgHome: gpg.gnupgHome });
+    const msgNoTag = H.runBin('git-release-squash', ['tail', repo, '--message=release one'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36: --message without --tag is a usage error, exit 2', msgNoTag, 2);
 
-    const msgFileNoTag = H.runBin('release-squash', ['tail', repo, '--message-file=' + msgFile], { gnupgHome: gpg.gnupgHome });
+    const msgFileNoTag = H.runBin('git-release-squash', ['tail', repo, '--message-file=' + msgFile], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36: --message-file without --tag is a usage error, exit 2', msgFileNoTag, 2);
   }
 }
@@ -67,13 +67,13 @@ function taggerDate(repo: string, gpg: H.Gpg, tag: string): string | null {
     const repo = H.initRepo('ac36-basic', gpg);
     H.commit(repo, gpg, 'root', { 'a.txt': 'one\n' });
 
-    const dry = H.runBin('release-squash', ['tail', repo, '--tag=v1', '--message=release one'], { gnupgHome: gpg.gnupgHome });
+    const dry = H.runBin('git-release-squash', ['tail', repo, '--tag=v1', '--message=release one'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36 dry run: exit 0', dry, 0);
     if (!dry.missing) {
       T.contains('AC-36 dry run: the planned tag name and title appear (in place of "(untagged)")',
         dry.stdout, 'v1');
       T.contains('AC-36 dry run: still prints the dry-run line, writes nothing',
-        dry.stdout, 'release-squash: dry run, no ref changed (use --apply to write)');
+        dry.stdout, 'git-release-squash: dry run, no ref changed (use --apply to write)');
       const tags = H.gitRaw(repo, gpg, ['tag', '-l']);
       T.eq('AC-36 dry run: no tag was created', tags.trim(), '');
     }
@@ -81,7 +81,7 @@ function taggerDate(repo: string, gpg: H.Gpg, tag: string): string | null {
     const branch = H.branchName(repo, gpg);
     const headBefore = H.revParse(repo, gpg, 'HEAD');
 
-    const applied = H.runBin('release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--apply'], { gnupgHome: gpg.gnupgHome });
+    const applied = H.runBin('git-release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--apply'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36 apply: exit 0', applied, 0);
     if (!applied.missing) {
       const headSha = H.revParse(repo, gpg, 'HEAD');
@@ -131,7 +131,7 @@ function taggerDate(repo: string, gpg: H.Gpg, tag: string): string | null {
     const msgFile = path.join(H.freshDir("ac36-multiline-msg"), "ac36-multiline-msg.txt");
     fs.writeFileSync(msgFile, 'release two\n\nSome further release notes.\n');
 
-    const applied = H.runBin('release-squash', ['tail', repo, '--tag=v2', '--message-file=' + msgFile, '--apply'], { gnupgHome: gpg.gnupgHome });
+    const applied = H.runBin('git-release-squash', ['tail', repo, '--tag=v2', '--message-file=' + msgFile, '--apply'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36 (--message-file) apply: exit 0', applied, 0);
     if (!applied.missing) {
       const headSha = H.revParse(repo, gpg, 'HEAD');
@@ -156,7 +156,7 @@ function taggerDate(repo: string, gpg: H.Gpg, tag: string): string | null {
     H.commit(repo, gpg, 'untagged follow-up', { 'a.txt': 'two\n' });
 
     const refsBefore = H.gitRaw(repo, gpg, ['show-ref']);
-    const r = H.runBin('release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--apply'], { gnupgHome: gpg.gnupgHome });
+    const r = H.runBin('git-release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--apply'], { gnupgHome: gpg.gnupgHome });
     T.exit('AC-36: refuses when the tag already exists', r, 1);
     if (!r.missing) {
       T.contains('AC-36: refusal names the existing tag', r.stderr, 'tag v1 already exists');

@@ -4,7 +4,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac17');
 if (gpg) {
@@ -14,7 +14,7 @@ if (gpg) {
   H.commit(repo, gpg, 'third, HEAD', { 'a.txt': 'three\n' });
   const headTreeBefore = H.treeOf(repo, gpg, 'HEAD');
 
-  const applied = H.runBin('release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-17 tail --apply on a zero-tag repo: exit 0', applied, 0);
   if (!applied.missing) {
     const log = H.log(repo, gpg, ['--oneline']);

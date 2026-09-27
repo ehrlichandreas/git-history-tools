@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* history-rewrite (docs/SPECIFICATION.md § 3): replace / add-file. */
+/* git-history-rewrite (docs/SPECIFICATION.md § 3): replace / add-file. */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -470,7 +470,7 @@ function cmdAddFile(bin: string, args: string[]): void {
   });
 }
 
-main('history-rewrite', (bin) => {
+main('git-history-rewrite', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
   if (sub === 'replace') return cmdReplace(bin, rest);

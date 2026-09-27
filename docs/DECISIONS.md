@@ -6,7 +6,7 @@ git-history-tools is a skill folder with three tools for preparing a git
 history for publication. All three keep commits signed, and none of them
 pushes.
 
-**release-squash**
+**git-release-squash**
 - `plan <repo>`: dry run. It prints which commits fold into which tag, the
   new subjects, and the tree-equality check per tag. It changes no refs.
 - `apply <repo> --map <file>`: writes the squashed history. It makes a
@@ -28,7 +28,7 @@ pushes.
   `--faked-system-time`.
 - It refuses merges, a dirty tree and an untagged HEAD.
 
-**leak-scan**
+**git-leak-scan**
 - `scan <repo> [--terms <file>]` searches every reachable blob, every
   commit and tag message, and every author/committer/tagger line.
 - Built-in categories are emails, URLs, local home paths, hostnames, IPs,
@@ -39,7 +39,7 @@ pushes.
 - Exit status is 0 when clean, 1 on hits and 2 on usage errors.
 - An allowlist file (`--allow <file>`) suppresses known-good matches.
 
-**history-rewrite**
+**git-history-rewrite**
 - `replace <repo> --rules <file>` applies ordered literal replacements to
   every text blob in every commit (`from<TAB>to` per line). It refuses if
   a commit or tag message would change.
@@ -59,7 +59,7 @@ pushes.
   - only the expected tree delta;
   - all commits and annotated tags carry a good signature;
   - with squash, every commit is tagged;
-  - with replace, a leak-scan of the rule sources finds 0 hits.
+  - with replace, a git-leak-scan of the rule sources finds 0 hits.
 - Rules and terms files live outside the repo and are never committed.
   The tools warn if the file sits inside the target repo.
 - Node.js ≥ 18 with no dependencies. The layout is `SKILL.md`, `bin/`
@@ -74,7 +74,7 @@ pushes.
 
 **This repo's own history** follows the same model: only tagged release
 commits with anonymous dates. The first release squashes its working
-commits using release-squash itself.
+commits using git-release-squash itself.
 
 ## D2: release step in one command; dry runs write nothing (v0.1)
 
@@ -95,7 +95,7 @@ With `--tag`, `tail`:
 Without `--tag`, the current `(untagged)` behaviour stays, for staging.
 
 **Dry runs write no git objects either.** That applies to every
-subcommand, including `history-rewrite`. Hashes for the report are
+subcommand, including `git-history-rewrite`. Hashes for the report are
 computed without `-w`, and trees with `mktree --missing`. A dry run leaves
 `.git/objects` byte-identical.
 

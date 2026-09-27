@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('leak-scan');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac22');
 if (gpg) {
@@ -18,7 +18,7 @@ if (gpg) {
   const allowFile = path.join(H.freshDir("ac22-allow"), "ac22-allow.txt");
   fs.writeFileSync(allowFile, '# known-good\njdoe@internal.example\n');
 
-  const r = H.runBin('leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-22 scan --allow: one hit remains (the non-allowlisted email), exit 1', r, 1);
   if (!r.missing) {
     T.check('AC-22: the allowlisted email does NOT appear', !r.stdout.includes('jdoe@internal.example'), r.stdout);
@@ -29,7 +29,7 @@ if (gpg) {
    * two planted emails would otherwise still leave H.FIXTURE_EMAIL as a
    * hit in every commit's identity line. */
   fs.writeFileSync(allowFile, 'jdoe@internal.example\nasmith@internal.example\n' + H.FIXTURE_EMAIL + '\n');
-  const clean = H.runBin('leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
+  const clean = H.runBin('git-leak-scan', ['scan', repo, '--allow', allowFile], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-22: allowlisting both known matches makes the scan clean, exit 0', clean, 0);
 }
 

@@ -1,4 +1,4 @@
-/* AC-01 -- docs/SPECIFICATION.md § 1.1 `release-squash plan`: per-tag
+/* AC-01 -- docs/SPECIFICATION.md § 1.1 `git-release-squash plan`: per-tag
  * fold-count/subject lines, the tree-equality "OK" line, and a tag sitting
  * on the repo's own root commit (no prior tag to fold from).
  *
@@ -15,7 +15,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac01');
 if (gpg) {
@@ -29,7 +29,7 @@ if (gpg) {
   const c2 = H.commit(repo, gpg, 'third', { 'a.txt': 'three\n' });
   H.tagSigned(repo, gpg, 'v2', 'release v2');
 
-  const r = H.runBin('release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-01 plan: exit 0', r, 0);
   if (!r.missing) {
     T.contains('AC-01 plan: v1 (root commit, 1 commit folded) line mentions tag and count',
@@ -61,7 +61,7 @@ if (gpg) {
       !r.stdout.includes('untagged commit'), r.stdout);
   }
 
-  const dirty = H.runBin('release-squash', ['plan', repo + '-does-not-exist'], { gnupgHome: gpg.gnupgHome });
+  const dirty = H.runBin('git-release-squash', ['plan', repo + '-does-not-exist'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-01 fixture: plan refuses a path that is not a git repo', dirty, 1);
   if (!dirty.missing) {
     T.contains('AC-01: "not a git repository" names the path', dirty.stderr, 'not a git repository');

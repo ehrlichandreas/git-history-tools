@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* leak-scan (docs/SPECIFICATION.md § 2): scan. */
+/* git-leak-scan (docs/SPECIFICATION.md § 2): scan. */
 import * as git from './git.ts';
 import { UsageError, Refusal, parseFlags, resolveOutsideFile, main } from './cli.ts';
 import * as leakscan from './leakscan.ts';
@@ -142,7 +142,7 @@ function cmdScan(bin: string, args: string[]): void {
   process.exitCode = lines.length > 0 ? 1 : 0;
 }
 
-main('leak-scan', (bin) => {
+main('git-leak-scan', (bin) => {
   const sub = process.argv[2];
   const rest = process.argv.slice(3);
   if (sub === 'scan') return cmdScan(bin, rest);

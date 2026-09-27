@@ -4,7 +4,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('leak-scan');
+H.requireBin('git-leak-scan');
 
 const gpg = H.setupGpg('ac20');
 if (gpg) {
@@ -13,7 +13,7 @@ if (gpg) {
   git(['config', 'user.email', 'jdoe@internal.example']);
   const c1 = H.commit(repo, gpg, 'ordinary clean commit message', { 'a.txt': 'nothing sensitive\n' });
 
-  const r = H.runBin('leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-leak-scan', ['scan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-20 scan: the author-identity-only leak is still found, exit 1', r, 1);
   if (!r.missing) {
     T.contains('AC-20: the email is reported', r.stdout, 'scan: email jdoe@internal.example');

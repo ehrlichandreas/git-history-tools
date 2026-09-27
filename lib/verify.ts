@@ -48,7 +48,7 @@ export function verifySignatures(repo: string, env: NodeJS.ProcessEnv): VerifyRe
   return line('signatures', true);
 }
 
-/** release-squash `apply` only: every commit reachable from HEAD has at
+/** git-release-squash `apply` only: every commit reachable from HEAD has at
  * least one tag pointing at it. */
 export function verifyEveryCommitTagged(repo: string, env: NodeJS.ProcessEnv): VerifyResult {
   const commitsRaw = git.text(repo, ['rev-list', 'HEAD'], { env });
@@ -65,7 +65,7 @@ export function verifyEveryCommitTagged(repo: string, env: NodeJS.ProcessEnv): V
   return line('squash: every commit tagged', true);
 }
 
-/** history-rewrite `replace` only: a leak-scan (built-in categories, no
+/** git-history-rewrite `replace` only: a git-leak-scan (built-in categories, no
  * terms/allow) of the right-hand replacement values finds 0 hits. */
 export function verifyRuleSourcesClean(replacementValues: string[]): VerifyResult {
   const found: string[] = [];

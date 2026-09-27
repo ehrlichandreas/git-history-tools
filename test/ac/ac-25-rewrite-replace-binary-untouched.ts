@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 const gpg = H.setupGpg('ac25');
 if (gpg) {
@@ -18,7 +18,7 @@ if (gpg) {
   const rulesFile = path.join(H.freshDir("ac25-rules"), "ac25-rules.txt");
   fs.writeFileSync(rulesFile, 'jdoe@internal.example\tREDACTED\n');
 
-  const r = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-25 replace --apply: exit 0', r, 0);
   if (!r.missing) {
     const headSha = H.revParse(repo, gpg, 'HEAD');

@@ -75,7 +75,7 @@ export function resolveOutsideFile(repo: string, flagName: string, filePath: str
 
 /** Top-level dispatcher: runs fn(), prints via the <bin>: <reason> contract,
  * and sets the right exit code for UsageError (2) vs Refusal (1). `bin` is
- * the name the user invoked (e.g. 'release-squash'), not the lib file's own
+ * the name the user invoked (e.g. 'git-release-squash'), not the lib file's own
  * basename -- those differ since every tool's logic lives in lib/<tool>.ts
  * but is invoked via bin/<tool>. */
 export function main(bin: string, fn: (bin: string) => void): void {

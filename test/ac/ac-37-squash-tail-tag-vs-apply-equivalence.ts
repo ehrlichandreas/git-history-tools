@@ -28,7 +28,7 @@ function subjectOf(repo: string, gpg: H.Gpg, rev: string): string | null {
 }
 function rowsKey(rows: Row[]): string { return rows.map(r => r.tree + '\t' + r.date + '\t' + r.subject).join('\n'); }
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 /* Repo A: both releases tagged up front (real `git tag -s`, with the
  * SAME message text `tail --tag` will later be given), one `apply`. */
@@ -41,7 +41,7 @@ function buildApplyAll(label: string, gpg: H.Gpg): Row[] | null {
   H.tagSigned(repo, gpg, 'v2', 'release two');
 
   const map = path.join(H.freshDir(label + '-map'), label + '-map.txt');
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(label + ': apply --apply over both pre-tagged releases: exit 0', r, 0);
   if (r.missing) return null;
   const s1 = H.revParse(repo, gpg, 'v1^{commit}');
@@ -58,13 +58,13 @@ function buildApplyAll(label: string, gpg: H.Gpg): Row[] | null {
 function buildTailPerRelease(label: string, gpg: H.Gpg): Row[] | null {
   const repo = H.initRepo(label, gpg);
   H.commit(repo, gpg, 'root', { 'a.txt': 'one\n' });
-  const r1 = H.runBin('release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r1 = H.runBin('git-release-squash', ['tail', repo, '--tag=v1', '--message=release one', '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(label + ': tail --tag=v1 (release one): exit 0', r1, 0);
   if (r1.missing) return null;
 
   H.commit(repo, gpg, 'tail 1', { 'a.txt': 'two\n' });
   H.commit(repo, gpg, 'tail 2', { 'a.txt': 'three\n' });
-  const r2 = H.runBin('release-squash', ['tail', repo, '--tag=v2', '--message=release two', '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r2 = H.runBin('git-release-squash', ['tail', repo, '--tag=v2', '--message=release two', '--name=ac37', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit(label + ': tail --tag=v2 (release two): exit 0', r2, 0);
   if (r2.missing) return null;
 

@@ -5,8 +5,8 @@
  * Contract for every test file in this tree:
  *
  *   import * as H from '../lib/harness.ts';
- *   H.requireBin('release-squash');
- *   const r = H.runBin('release-squash', ['plan', repo], {});
+ *   H.requireBin('git-release-squash');
+ *   const r = H.runBin('git-release-squash', ['plan', repo], {});
  *   H.T.eq('description', actual, expected);
  *   H.T.finish();
  *
@@ -138,7 +138,7 @@ export interface Gpg {
 }
 
 /* The committer/key identity every fixture repo uses. It is itself
- * email-shaped, so leak-scan's built-in `email` category legitimately
+ * email-shaped, so git-leak-scan's built-in `email` category legitimately
  * flags it in EVERY fixture commit's author/committer line -- a test
  * asserting a scan comes back clean (exit 0) must --allow this exact
  * string, or it is testing an artifact of the fixture, not the tool. */

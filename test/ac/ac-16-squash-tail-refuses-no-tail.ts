@@ -3,7 +3,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac16');
 if (gpg) {
@@ -11,12 +11,12 @@ if (gpg) {
   H.commit(repo, gpg, 'root', { 'a.txt': 'one\n' });
   H.tagSigned(repo, gpg, 'v1', 'release v1');
 
-  const dry = H.runBin('release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
+  const dry = H.runBin('git-release-squash', ['tail', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-16 tail (dry run) refuses when HEAD is already tagged', dry, 1);
   if (!dry.missing) T.contains('AC-16: names "HEAD is already tagged, nothing to squash"',
     dry.stderr, 'HEAD is already tagged, nothing to squash');
 
-  const applied = H.runBin('release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['tail', repo, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-16 tail --apply refuses too', applied, 1);
   if (!applied.missing) {
     const refsAfter = H.gitRaw(repo, gpg, ['show-ref']);

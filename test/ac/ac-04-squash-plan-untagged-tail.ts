@@ -4,7 +4,7 @@
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac04');
 if (gpg) {
@@ -14,7 +14,7 @@ if (gpg) {
   H.commit(repo, gpg, 'post-release 1', { 'a.txt': 'two\n' });
   H.commit(repo, gpg, 'post-release 2', { 'a.txt': 'three\n' });
 
-  const r = H.runBin('release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-04 plan: exit 0', r, 0);
   if (!r.missing) {
     T.contains('AC-04: v1 itself still reported', r.stdout, 'plan: v1 folds 1 commit(s)');
@@ -31,7 +31,7 @@ if (gpg2) {
   H.commit(repo2, gpg2, 'only commit, no tags yet', { 'a.txt': 'one\n' });
   H.commit(repo2, gpg2, 'second, still no tags', { 'a.txt': 'two\n' });
 
-  const r2 = H.runBin('release-squash', ['plan', repo2], { gnupgHome: gpg2.gnupgHome });
+  const r2 = H.runBin('git-release-squash', ['plan', repo2], { gnupgHome: gpg2.gnupgHome });
   T.exit('AC-04b plan on a zero-tag repo: exit 0', r2, 0);
   if (!r2.missing) {
     T.contains('AC-04b: with zero tags, the untagged tail reads "from the start of history"',

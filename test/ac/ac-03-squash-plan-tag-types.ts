@@ -12,7 +12,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 function objType(repo: string, gpg: H.Gpg, rev: string): string {
   const r = spawnSync('git', ['cat-file', '-t', rev], { cwd: repo, env: gpg.env, encoding: 'utf8' });
@@ -32,7 +32,7 @@ if (gpg) {
     objType(repo, gpg, 'v1'), 'commit');
   T.eq('AC-03 fixture: v2 really is an annotated tag object', objType(repo, gpg, 'v2'), 'tag');
 
-  const r = H.runBin('release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['plan', repo], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-03 plan: exit 0 across a lightweight and an annotated tag', r, 0);
   if (!r.missing) {
     T.contains('AC-03: lightweight tag v1 is reported like any other tag',
@@ -49,7 +49,7 @@ if (gpg) {
   }
 
   const map = path.join(H.freshDir("ac03-map"), "ac03-map.txt");
-  const applied = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const applied = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-03 apply --apply: exit 0', applied, 0);
   if (!applied.missing) {
     T.eq('AC-03 apply: v1 is STILL lightweight after the rewrite, not upgraded to an annotated/signed tag',

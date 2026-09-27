@@ -4,7 +4,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 function identLine(repo: string, gpg: H.Gpg, rev: string, field: string): string | null {
   const raw = H.catFile(repo, gpg, rev, '-p');
@@ -21,7 +21,7 @@ if (gpg) {
   const beforeCommitter = identLine(repo, gpg, c1.sha!, 'committer');
 
   const map = path.join(H.freshDir("ac12-map"), "ac12-map.txt");
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--dates=keep', '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--dates=keep', '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-12 apply --apply --dates=keep: exit 0', r, 0);
   if (!r.missing) {
     const v1 = H.revParse(repo, gpg, 'v1^{commit}'); /* v1 is an annotated tag -- peel to the commit */
@@ -29,7 +29,7 @@ if (gpg) {
     T.eq('AC-12: committer date is preserved byte-for-byte', identLine(repo, gpg, v1, 'committer'), beforeCommitter);
   }
 
-  const bad = H.runBin('release-squash', ['apply', repo, '--map', map, '--dates=whatever'], { gnupgHome: gpg.gnupgHome });
+  const bad = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--dates=whatever'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-12: an unrecognised --dates value is a usage error, exit 2', bad, 2);
 }
 

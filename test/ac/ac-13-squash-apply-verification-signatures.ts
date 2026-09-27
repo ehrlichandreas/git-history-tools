@@ -7,7 +7,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('release-squash');
+H.requireBin('git-release-squash');
 
 const gpg = H.setupGpg('ac13');
 if (gpg) {
@@ -18,7 +18,7 @@ if (gpg) {
   H.tagSigned(repo, gpg, 'v2', 'release v2');
 
   const map = path.join(H.freshDir("ac13-map"), "ac13-map.txt");
-  const r = H.runBin('release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-release-squash', ['apply', repo, '--map', map, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-13 apply --apply: exit 0', r, 0);
   if (!r.missing) {
     T.contains('AC-13: the signatures check reports OK', r.stdout, 'verify: signatures: OK');

@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as H from '../lib/harness.ts';
 const T = H.T;
 
-H.requireBin('history-rewrite');
+H.requireBin('git-history-rewrite');
 
 const gpg = H.setupGpg('ac24');
 if (gpg) {
@@ -20,7 +20,7 @@ if (gpg) {
    * original text independently. */
   fs.writeFileSync(rulesFile, 'alpha\tgamma\ngamma beta\tdone\n');
 
-  const r = H.runBin('history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
+  const r = H.runBin('git-history-rewrite', ['replace', repo, '--rules', rulesFile, '--apply'], { gnupgHome: gpg.gnupgHome });
   T.exit('AC-24 replace --apply: exit 0', r, 0);
   if (!r.missing) {
     const headSha = H.revParse(repo, gpg, 'HEAD');

@@ -53,16 +53,16 @@ diverge for the same input: both call the same `rewriteTreeWithRules`/
 `setPathInTree`/`rewriteBlob` functions with only the `write` flag
 differing, so the sha computed with `write=false` is definitionally the
 sha that `git hash-object -w`/`mktree` would assign to the same bytes.
-`history-rewrite`'s own `--hook` still runs (and may write) during a dry
+`git-history-rewrite`'s own `--hook` still runs (and may write) during a dry
 run's tree computation, by design (§ 0): only the tool's own preview
 work must not write, and it does not.
 
 One (non-blocking) observation: `lib/rewrite.js`'s own `isDirty`
 check and its call in `runRewrite` (present before `58931b4`) were
 removed in this diff with no replacement. There is no spec requirement
-or AC for a dirty-tree refusal on `history-rewrite` (checked
+or AC for a dirty-tree refusal on `git-history-rewrite` (checked
 docs/SPECIFICATION.md and `test/ac/*rewrite*`; only `ght-squash` has
-that rule, § 1.2/AC-06), and `history-rewrite` never touches the
+that rule, § 1.2/AC-06), and `git-history-rewrite` never touches the
 working tree (it works entirely through plumbing), so removing dead,
 unspecified code here is correct, not a regression.
 
@@ -135,7 +135,7 @@ illustrative examples inside `docs/verification/ght-v0.1.md` itself
 (unchanged from GHT-3). Separately diffed `4df8c04`, `58931b4`,
 `6202166`, `a4e8b9f` individually against email/URL/local-path regexes:
 the only match anywhere in the D2 commits is `jdoe@internal.example`,
-the pre-existing AC-39 leak-scan test fixture. No new real leak
+the pre-existing AC-39 git-leak-scan test fixture. No new real leak
 introduced by D2.
 
 ## Clean-up
@@ -154,7 +154,7 @@ suite runs. `~/.gnupg` not touched. nanojira's real repo: untouched
 **Verdict: PASS.** The D2 contract (`a4e8b9f`) is implemented correctly
 in `58931b4`/`6202166`: `tail --tag` produces the expected subject, tag,
 tagger date and pinned signature; refuses before any write when the tag
-exists; dry runs for both `release-squash` and `history-rewrite` write
+exists; dry runs for both `git-release-squash` and `git-history-rewrite` write
 zero git objects, and the dry-run/`--apply` hash computation is provably
 the same function with only a `write` flag differing. 40/40 ACs
 confirmed; 5/5 suite runs green (one-time flakiness not reproduced);
@@ -181,7 +181,7 @@ before.
 | `apply` | AC-09 | bundle's branch head and `v1` both show the post-apply shas instead of the pre-apply ones |
 | `tail` (untagged) | AC-15 | bundle's branch head shows the post-tail sha |
 | `tail --tag` | AC-36 | bundle's branch head shows the post-release sha; bundle now (wrongly) already carries `refs/tags/v1` |
-| `history-rewrite` (`replace`) | AC-32 | bundle's branch head and `v1` both show the rewritten shas |
+| `git-history-rewrite` (`replace`) | AC-32 | bundle's branch head and `v1` both show the rewritten shas |
 
 All four mutations caught; the gap from GHT-6 is closed.
 
