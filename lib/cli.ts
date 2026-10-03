@@ -53,24 +53,35 @@ export function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
 
 /** Resolves a --rules/--terms/--allow style path, applying the shared rules:
  * must exist (usage error otherwise), must not resolve inside <repo>
- * (refusal otherwise). flagName is e.g. '--rules'. The containment check
- * resolves symlinks in the parent directory only, not the file's own final
- * path segment -- a symlink that itself lives inside the repo is caught
- * even when it points to a file outside, since the symlink would still get
- * committed the next time the repo's own history is rewritten. */
+ * (refusal otherwise). flagName is e.g. '--rules'. Two separate containment
+ * checks, both must pass:
+ * - symlinks in the parent directory resolved, but the path's own final
+ *   segment kept as-is -- catches a symlink that itself lives inside the
+ *   repo even when it points to a file outside, since the symlink would
+ *   still get committed the next time the repo's own history is rewritten;
+ * - every symlink fully resolved, including the final segment -- catches
+ *   a symlink living outside the repo (so the first check alone sees it as
+ *   outside) whose target is itself inside the repo. */
+function isInsideRepo(realRepo: string, candidate: string): boolean {
+  const rel = path.relative(realRepo, candidate);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 export function resolveOutsideFile(repo: string, flagName: string, filePath: string): string {
   if (!fs.existsSync(filePath)) {
     throw new UsageError(flagName + ' file does not exist: ' + filePath);
   }
   const abs = path.resolve(filePath);
-  const realDir = fs.realpathSync(path.dirname(abs));
-  const realFile = path.join(realDir, path.basename(abs));
   const realRepo = fs.realpathSync(repo);
-  const rel = path.relative(realRepo, realFile);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+
+  const realDir = fs.realpathSync(path.dirname(abs));
+  const realFileShallow = path.join(realDir, path.basename(abs));
+  const realFileFull = fs.realpathSync(abs);
+
+  if (isInsideRepo(realRepo, realFileShallow) || isInsideRepo(realRepo, realFileFull)) {
     throw new Refusal(flagName + ' points inside the repo (' + filePath + ') -- keep it outside');
   }
-  return fs.realpathSync(filePath);
+  return realFileFull;
 }
 
 /** Top-level dispatcher: runs fn(), prints via the <bin>: <reason> contract,

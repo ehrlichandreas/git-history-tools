@@ -105,3 +105,28 @@ computed without `-w`, and trees with `mktree --missing`. A dry run leaves
 - A repeat run of the suite leaves 0 files in the tmp root.
 - A new AC pins plan/apply output for a single-commit group that carries
   two tags.
+
+## D3: two bug fixes (v0.3.1)
+
+**`resolveOutsideFile()`'s containment check was one symlink short.** It
+resolved symlinks in the given path's *parent* directory, but never the
+path's own final segment. That catches a symlink living inside the repo
+pointing out (the symlink itself would get committed), but missed the
+opposite case: a `--rules`/`--terms`/`--allow` symlink living *outside* the
+repo whose target resolves *inside* it was wrongly accepted. Fixed by also
+fully resolving the given path (following every symlink, including the
+final segment) and refusing if *either* resolution lands inside the repo —
+both checks run now, neither replaces the other.
+
+**`createBackupBundle()` didn't resolve `<repo>` to an absolute path before
+taking its `basename`/`dirname`.** For `<repo>` given as `.` (normal once
+already `cd`'d into the repo), `path.dirname('.')` is `.` itself, so the
+backup bundle landed inside the repo's own working tree instead of next to
+it — defeating the bundle's purpose (it must survive even a broken repo)
+and leaving a stray file behind. Fixed by resolving `<repo>` with
+`path.resolve()` first. The bug is specifically about a *relative* `<repo>`
+with nothing for `dirname`/`basename` to recover an absolute parent from —
+a trailing slash or an embedded `..` don't trigger it on their own, since
+once a path is absolute, `path.dirname`/`path.basename` already strip a
+trailing slash and `path.join`'s normalize already cancels a redundant
+`..`, both before this fix existed.

@@ -3,7 +3,7 @@ name: git-history-tools
 description: "Three tools for preparing a git history for publication: git-release-squash folds commits into one per tag, git-leak-scan searches every reachable blob/message/identity for emails/URLs/paths/hostnames/IPs/secrets/custom terms, git-history-rewrite applies literal text replacements or adds a file into every commit. All three keep commits signed and never push. Use when a repository's history needs to be squashed to tagged releases, checked for leaked information before going public, or rewritten to remove sensitive strings."
 license: MIT
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # git-history-tools

@@ -53,4 +53,39 @@ if (gpg) {
   }
 }
 
+/* Bug fix regression: lib/bundle.ts's createBackupBundle() used to compute
+ * basename/dirname on the given <repo> argument as-is, not resolved to an
+ * absolute path first. For a relative form like '.' (very normal once
+ * already cd'd into the repo -- README.md's own examples do this),
+ * path.dirname('.') is '.' itself, so the bundle landed INSIDE the repo's
+ * own working tree instead of as a sibling next to it.
+ *
+ * A trailing slash or an embedded '..' do NOT reproduce this bug and are
+ * deliberately not covered here: fixture repo paths (from H.initRepo) are
+ * already absolute, and once a path is absolute, Node's own path.dirname/
+ * path.basename already strip a trailing slash, and path.join's normalize
+ * already cancels a redundant '..' segment -- the old, unfixed code
+ * already produced the right sibling path for both. The bug is strictly
+ * about a RELATIVE <repo> (no absolute root for dirname/basename to
+ * recover), which '.' is the natural way to trigger. */
+{
+  const gpg = H.setupGpg('ac09-dot');
+  if (gpg) {
+    const repo = H.initRepo('ac09-dot', gpg);
+    H.commit(repo, gpg, 'root', { 'a.txt': 'one\n' });
+
+    const r = H.runBin('git-release-squash', ['tail', '.', '--apply'], { gnupgHome: gpg.gnupgHome, cwd: repo });
+    T.exit('AC-09 (repo="."): tail --apply exit 0', r, 0);
+    if (!r.missing) {
+      const parent = path.dirname(repo);
+      const base = path.basename(repo);
+      const entries = fs.readdirSync(parent).filter(n => n.startsWith(base + '.backup-') && n.endsWith('.bundle'));
+      T.check('AC-09 (repo="."): exactly one backup bundle lands next to the repo, not inside it',
+        entries.length === 1, 'next to repo: ' + JSON.stringify(fs.readdirSync(parent)));
+      const status = H.gitRaw(repo, gpg, ['status', '--porcelain']);
+      T.eq('AC-09 (repo="."): working tree is clean afterward (no stray bundle inside it)', status.trim(), '');
+    }
+  }
+}
+
 T.finish();

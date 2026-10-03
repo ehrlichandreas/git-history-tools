@@ -11,8 +11,9 @@ function utcStamp(d: Date): string {
 /** Creates <parent-of-repo>/<repo-basename>.backup-<UTC>.bundle, --all,
  * capturing every ref as it stands right now. Returns the bundle path. */
 export function createBackupBundle(repo: string, env: NodeJS.ProcessEnv): string {
-  const base = path.basename(repo);
-  const dir = path.dirname(repo);
+  const absRepo = path.resolve(repo);
+  const base = path.basename(absRepo);
+  const dir = path.dirname(absRepo);
   const stamp = utcStamp(new Date());
   const bundlePath = path.join(dir, base + '.backup-' + stamp + '.bundle');
   git.text(repo, ['bundle', 'create', bundlePath, '--all'], { env });
