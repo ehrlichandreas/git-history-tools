@@ -28,10 +28,17 @@ export function verifyTreeDelta(checks: TreeCheck[]): VerifyResult {
   return line('tree delta', true);
 }
 
-/** Every commit and annotated tag reachable from any ref has a signature
- * git verify-commit/verify-tag accepts. */
+/** Every commit and annotated tag reachable from any local branch or tag
+ * has a signature git verify-commit/verify-tag accepts. Deliberately
+ * --branches --tags, not --all: --all also walks refs/remotes/* (and
+ * refs/stash, refs/notes), and a stale remote-tracking ref left pointing
+ * at the pre-rewrite tip -- never touched by apply/tail/replace, which
+ * only move refs/heads/* and refs/tags/* -- would otherwise still show up
+ * as "reachable" and get verified, even though it is no longer part of
+ * the history this write produced (and may predate the current signing
+ * key entirely). */
 export function verifySignatures(repo: string, env: NodeJS.ProcessEnv): VerifyResult {
-  const commitsRaw = git.text(repo, ['rev-list', '--all'], { env });
+  const commitsRaw = git.text(repo, ['rev-list', '--branches', '--tags'], { env });
   const commits = commitsRaw ? commitsRaw.split('\n') : [];
   for (const c of commits) {
     const r = git.run(repo, ['verify-commit', c], { env });

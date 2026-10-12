@@ -367,8 +367,11 @@ verify), in this order, each printed as `verify: <check>: OK` or `verify:
    corresponding pre-rewrite tree it is supposed to preserve (the tagged
    commit's tree for squash, the rule-rewritten tree for replace/add-file)
    — nothing else changed.
-2. `signatures` — every commit and annotated tag reachable from any ref
-   has a signature `git verify-commit`/`git verify-tag` accepts.
+2. `signatures` — every commit and annotated tag reachable from any local
+   branch or tag (`refs/heads/*`, `refs/tags/*` -- **not**
+   `refs/remotes/*`, which `apply`/`tail`/`replace`/`add-file` never touch
+   and may still point at pre-rewrite history) has a signature `git
+   verify-commit`/`git verify-tag` accepts.
 3. `squash: every commit tagged` — (git-release-squash `apply` only; skipped,
    not printed, for `tail`/`replace`/`add-file`) every commit reachable
    from HEAD has at least one tag pointing at it.

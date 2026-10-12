@@ -130,3 +130,46 @@ a trailing slash or an embedded `..` don't trigger it on their own, since
 once a path is absolute, `path.dirname`/`path.basename` already strip a
 trailing slash and `path.join`'s normalize already cancels a redundant
 `..`, both before this fix existed.
+
+## D4: `verifySignatures()` walked the wrong refs (found live, dogfooding)
+
+`verifySignatures()` checked every commit from `git rev-list --all`, which
+also walks `refs/remotes/*` (and `refs/stash`, `refs/notes`) — not just the
+`refs/heads/*`/`refs/tags/*` that `apply`/`tail`/`replace`/`add-file`
+actually write to. A real clone that still has a remote-tracking ref
+pointing at the pre-rewrite tip (normal: these tools never fetch or push)
+made that old, now-superseded commit still count as "reachable" and get
+checked — even though it isn't part of the history this write produced,
+and may be signed with an entirely different (possibly unknown-to-this-
+keyring) key than the one actually used for the rewrite. The `tree delta`
+check was unaffected (it only compares specific tree shas it already
+recorded, not something it walks refs to find).
+
+No existing AC caught this because every fixture repo is a bare `git init`
+with no remote, so `--all` and `--branches --tags` agreed by construction.
+Fixed by checking `git rev-list --branches --tags` instead of `--all`.
+
+## D5: `allRefCommitsTopoReverse()` had the same `--all` bug (found in review of D4)
+
+`git-history-rewrite`'s `allRefCommitsTopoReverse()` (shared by `replace`
+and `add-file`) built its commit list the same wrong way as D4's
+`verifySignatures()`: `git rev-list --all`, while `refTips()` -- what
+`runRewrite()` actually re-points afterward -- only ever reads
+`refs/heads`/`refs/tags`. Here the impact is worse than wasted work:
+
+- `replace` loops over every commit from that list checking
+  `refuseMessageChange` *before* `refTips()` is even consulted, so a stale
+  `refs/remotes/origin/<branch>` pointing at a commit whose message happens
+  to match a rule makes `replace` refuse with "commit `<sha>` message would
+  change" on a branch whose own history has no such commit at all -- a
+  false-positive refusal blocking a legitimate `replace`.
+- `--hook` (§ 3.1, "may write") runs against trees for these stale-only
+  commits too -- unwanted side effects, not just CPU waste, on commits the
+  user never intended to touch.
+- The extra, never-re-pointed-to rewritten objects for those commits are
+  separately harmless: topo-order and the resulting shas for the commits
+  that *are* actually re-pointed are unaffected by unrelated commits also
+  being in the list; the extra objects are just unreferenced garbage,
+  eventually GC'd.
+
+Fixed the same way as D4: `rev-list --all` → `rev-list --branches --tags`.

@@ -244,8 +244,16 @@ function runHook(hookPath: string, repo: string, ruleTreeSha: string, hookCache:
 
 /* --------------------------------------------------------- shared core --- */
 
+/* --branches --tags, not --all: --all also walks refs/remotes/* (and
+ * refs/stash, refs/notes), and refTips() below -- what actually gets
+ * re-pointed afterward -- only ever touches refs/heads/refs/tags. Any
+ * commit only reachable via a stale remote-tracking ref would otherwise
+ * still enter this list and get refuseMessageChange-checked (a false
+ * positive refusal for a commit that's never actually touched) and run
+ * through --hook (unwanted side effects), same root cause as D4's
+ * verifySignatures() fix in verify.ts. */
 function allRefCommitsTopoReverse(repo: string, env: Env): string[] {
-  const out = git.text(repo, ['rev-list', '--all', '--topo-order', '--reverse'], { env });
+  const out = git.text(repo, ['rev-list', '--branches', '--tags', '--topo-order', '--reverse'], { env });
   return out ? out.split('\n') : [];
 }
 
