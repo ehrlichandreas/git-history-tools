@@ -173,3 +173,76 @@ and `add-file`) built its commit list the same wrong way as D4's
   eventually GC'd.
 
 Fixed the same way as D4: `rev-list --all` → `rev-list --branches --tags`.
+
+## D6: `bin/*` wrappers didn't follow symlinks (found consuming this repo as an npm devDependency)
+
+All three `bin/*` wrappers took `$(dirname "$0")` at face value to locate
+`../lib/*.ts`. That works when run directly (`./bin/git-release-squash`),
+but breaks the moment this package is installed as a dependency: npm
+creates `node_modules/.bin/<name>` as a *symlink* to the real
+`bin/<name>` inside this package, and POSIX `dirname "$0"` does not follow
+symlinks — `$0` stays the literal `node_modules/.bin/<name>` path, so
+`../lib/<name>.ts` resolved to `node_modules/lib/<name>.ts` (one level too
+shallow, and missing the `git-history-tools/` segment entirely), and
+every invocation through `npx`/`node_modules/.bin` failed with
+`Cannot find module`.
+
+Fixed by resolving `$0` through its symlink chain first (the standard
+POSIX `while [ -h "$SOURCE" ]; do ...; done` idiom — works with both GNU
+and BSD/macOS `readlink`, unlike GNU-only `readlink -f`) before taking
+`dirname` and building the `../lib/*.ts` path.
+
+This fix is correct and still stands for the case it targets: running
+`bin/*` directly from a checkout that itself sits behind a symlink. It does
+**not**, on its own, make `npx git-release-squash` (or the other two) work
+once this package is actually installed as a dependency — see D7, found by
+Reviewer while checking this fix.
+
+## D7: compiled `lib/*.ts` even once `bin/*` resolves it correctly (found by Reviewer, reviewing D6)
+
+D6 fixed `bin/*`'s symlink-following, but Reviewer found that fix alone
+does not resolve the scenario it was meant for. Once `$0` resolves to the
+real, installed `lib/<name>.ts`, Node refuses to run it anyway:
+
+```
+Error [ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING]: Stripping types is
+currently unsupported for files under node_modules, for ".../node_modules/
+git-history-tools/lib/squash.ts"
+```
+
+Node's native TypeScript type-stripping unconditionally refuses any `.ts`
+file whose *resolved* path contains the literal string `node_modules`
+anywhere in it. This is a hard platform restriction, not a bug, and no flag
+works around it (not `--experimental-strip-types`, not
+`--experimental-transform-types`): Node assumes an installed dependency
+ships compiled JS, the same assumption this project's own consumer
+(nanojira) relies on for its shipped `dist/*.mjs`. A raw `.ts` file can
+therefore never be the runtime entry point for an npm-installed dependency
+— only a compiled `.js`/`.mjs` works.
+
+Fixed by giving this package a build step for its installable surface,
+mirroring nanojira's own `tools/bundle.ts`: `tools/bundle.ts` bundles each
+of `lib/squash.ts`, `lib/scan.ts` and `lib/rewrite.ts` (and everything they
+import from `lib/`) with esbuild into one self-contained ESM file each —
+`dist/squash.mjs`, `dist/scan.mjs`, `dist/rewrite.mjs` — enforcing, the same
+way nanojira's bundler does, that the bundle imports nothing but Node
+built-ins. `package.json`'s `"bin"` entries now point straight at these
+compiled files instead of at `bin/*`, so npm's own `node_modules/.bin/<name>`
+symlink lands on a `.mjs` that never needs type-stripping at all.
+
+`bin/git-release-squash` etc. are untouched and still exec the raw
+`lib/*.ts` directly — they are no longer reached through npm's `"bin"`
+mechanism, but they are still what direct-checkout/local invocation and
+every `test/ac/*.ts` use (via `test/lib/harness.ts`'s `runBin()`), so
+running this project's own test suite never requires a build step first.
+`tools/bundle.ts --check` (wired as `npm run build:check`, not into `npm
+test`) builds everything in memory and fails unless `dist/*.mjs` is already
+byte-identical to a fresh build and executable — a staleness check for
+whoever commits a `lib/*.ts` change to also run `npm run build`, not a gate
+in front of the test suite itself.
+
+A symlink test outside `node_modules` (D6's own regression coverage) has
+the same blind spot that let this ship once already: AC-41 instead builds
+an actual `node_modules`-shaped fixture (a fake package directory whose
+path literally contains `node_modules`, plus a real `.bin`-style symlink
+into its `dist/`) and runs a tool through it end to end.

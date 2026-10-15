@@ -1,2 +1,18 @@
 #!/bin/sh
-exec node "$(dirname "$0")/../lib/scan.ts" "$@"
+# Resolve $0 through any symlinks before taking its dirname -- npm installs
+# a package's "bin" entries as symlinks under node_modules/.bin/, and a
+# plain dirname "$0" there would resolve relative to .bin/, not this
+# script's own real directory, so ../lib/scan.ts would land in the wrong
+# place entirely. The while-loop form (not `readlink -f`) works with both
+# GNU and BSD/macOS readlink.
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+exec node "$DIR/../lib/scan.ts" "$@"
